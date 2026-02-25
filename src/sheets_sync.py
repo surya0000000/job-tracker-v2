@@ -1,5 +1,11 @@
 """Google Sheets sync - 3 tabs: Applications, Summary, Sync Log."""
 
+from pathlib import Path
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_path)
+
 import json
 import os
 from datetime import datetime

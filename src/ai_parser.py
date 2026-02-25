@@ -1,4 +1,10 @@
-"""Stage 2: AI parsing with Gemini 1.5 Flash."""
+"""Stage 2: AI parsing with Gemini 2.0 Flash."""
+
+from pathlib import Path
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_path)
 
 import json
 import re
@@ -89,6 +95,14 @@ def _log_skip(email_id: str, reason: str) -> None:
         f.write(f"[{datetime.utcnow().isoformat()}] AI SKIP [{email_id}]: {reason}\n")
 
 
+def log_info(msg: str) -> None:
+    """Log info (also to stdout for visibility)."""
+    line = f"[{datetime.utcnow().isoformat()}] {msg}"
+    print(line)
+    with open(config.ERRORS_LOG_PATH, "a") as f:
+        f.write(line + "\n")
+
+
 def _parse_ai_response(response_text: str, email_id: str) -> Optional[dict]:
     """Parse AI response. Returns dict or None."""
     text = (response_text or "").strip()
@@ -172,7 +186,7 @@ def parse_email_with_ai(email: dict) -> Optional[dict]:
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(
-            "gemini-1.5-flash",
+            "gemini-2.0-flash",
             system_instruction=SYSTEM_INSTRUCTION,
             generation_config=genai.types.GenerationConfig(
                 temperature=0.1,
@@ -190,6 +204,9 @@ Body (first 3000 chars):
         text = response.text if response else ""
 
         result = _parse_ai_response(text, email.get("id", "?"))
+
+        if result:
+            log_info(f"AI PARSED: company={result['company']} role={result['role']} stage={result['stage']}")
 
         # Retry once if response wasn't valid JSON
         if result is None and text and text.lower() != "null":
