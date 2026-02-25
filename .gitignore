@@ -1,0 +1,34 @@
+# Credentials - NEVER commit these
+credentials.json
+token.json
+.env
+*.env
+.env.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs (errors.log may contain sensitive info in CI - we upload as artifact)
+errors.log
+
+# OS
+.DS_Store
+Thumbs.db
