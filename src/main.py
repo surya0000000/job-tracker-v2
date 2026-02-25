@@ -1,10 +1,8 @@
 """Main sync orchestration - runs the full pipeline."""
 
+from dotenv import load_dotenv
 from pathlib import Path
-_env_path = Path(__file__).parent.parent / ".env"
-if _env_path.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_env_path)
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import json
 import os
@@ -26,25 +24,19 @@ from src import sheets_sync
 
 
 def log_error(msg: str) -> None:
-    """Log to errors.log."""
     with open(config.ERRORS_LOG_PATH, "a") as f:
         f.write(f"[{datetime.utcnow().isoformat()}] {msg}\n")
 
 
 def _is_ci_mode() -> bool:
-    """Detect if running in GitHub Actions (use Sheet as source of truth)."""
     return os.environ.get("CI") == "true" and bool(config.get_spreadsheet_id())
 
 
 def run_sync(is_initial: bool = False) -> dict:
-    """
-    Run full sync pipeline. Returns stats dict.
-    """
     use_sheet_mode = _is_ci_mode()
     if not use_sheet_mode:
         database.init_database()
 
-    # Determine scan window
     if is_initial:
         months_back = config.INITIAL_SCAN_MONTHS
         days_back = None
@@ -52,7 +44,6 @@ def run_sync(is_initial: bool = False) -> dict:
         months_back = None
         days_back = config.DAILY_SCAN_DAYS
 
-    # Get or create spreadsheet - ALWAYS use existing from .env if set
     spreadsheet_id = config.get_spreadsheet_id()
     if spreadsheet_id:
         print(f"Loaded SPREADSHEET_ID: {spreadsheet_id} from .env")
@@ -62,57 +53,45 @@ def run_sync(is_initial: bool = False) -> dict:
         print(f"\n>>> CREATED NEW SPREADSHEET <<<")
         print(f"Saved SPREADSHEET_ID to .env: {spreadsheet_id}")
 
-    # Get emails to skip forever (from Sheet in CI, from DB locally with checkpoint/resume)
     if use_sheet_mode:
         skip_forever_ids = sheets_sync.read_processed_emails(spreadsheet_id)
-        print(f"Found {len(skip_forever_ids)} already-processed emails in Sheet, will skip these")
-        retry_count = 0  # Sheet mode doesn't support retry tracking
+        print(f"Found {len(skip_forever_ids)} emails to skip forever")
+        print(f"Found 0 emails to retry from previous run")
+        print(f"Gemini API calls today: N/A (Sheet mode)")
     else:
         skip_forever_ids = database.get_skip_forever_ids()
         retry_ids = database.get_retry_ids()
         daily_count = database.get_daily_gemini_count()
-        print(f"Found {len(skip_forever_ids)} emails to skip forever (completed or pre-filter rejected)")
-        if retry_ids:
-            print(f"Found {len(retry_ids)} emails to retry from previous rate-limited run")
+        print(f"Found {len(skip_forever_ids)} emails to skip forever")
+        print(f"Found {len(retry_ids)} emails to retry from previous run")
         print(f"Gemini API calls today: {daily_count}/{config.GEMINI_DAILY_QUOTA_LIMIT}")
 
-    # Fetch emails
     print("Starting Gmail fetch...")
     emails = list(gmail_client.fetch_emails(months_back=months_back or 0, days_back=days_back))
     emails_scanned = len(emails)
 
-    # Filter: only process emails NOT in skip_forever (includes new + retry from rate limits)
-    to_process = []
+    to_process = [e for e in emails if e["id"] not in skip_forever_ids]
     newly_processed_ids = []
-    for email in emails:
-        if email["id"] not in skip_forever_ids:
-            to_process.append(email)
-
     new_applications = 0
     statuses_updated = 0
     emails_skipped = 0
     skip_reasons = []
 
-    # Get existing applications (from Sheet in CI, from DB locally)
     if use_sheet_mode:
         existing_apps = sheets_sync.read_applications_from_sheet(spreadsheet_id)
-        # Sort by last_updated desc for display
         existing_apps.sort(key=lambda a: a.get("last_updated", ""), reverse=True)
     else:
         existing_apps = database.get_all_applications()
 
     for idx, email in enumerate(to_process):
-        # Progress print every 3 emails (4s pause is inside parse_email_with_ai)
         if idx > 0 and idx % 3 == 0:
             print(f"Progress: {idx + 1} emails processed, {new_applications + statuses_updated} applications found so far")
 
-        # Check daily quota before AI call (local mode only)
         if not use_sheet_mode:
             if database.get_daily_gemini_count() >= config.GEMINI_DAILY_QUOTA_LIMIT:
                 print(f"\nDaily Gemini quota nearly reached ({config.GEMINI_DAILY_QUOTA_LIMIT}/1500). Stopping. Resume tomorrow.")
                 break
 
-        # Stage 1: Pre-filter (logs PRE-FILTER PASS when it passes)
         reject_reason = pre_filter.pre_filter(email)
         if reject_reason:
             emails_skipped += 1
@@ -123,8 +102,7 @@ def run_sync(is_initial: bool = False) -> dict:
                 database.mark_email_pre_filter_rejected(email["id"])
             continue
 
-        # Stage 2: AI parsing (4s between calls, 429 retry 3x, daily limit check)
-        status, parsed = ai_parser.parse_email_with_ai(email, check_daily_quota=not use_sheet_mode)
+        status, parsed = ai_parser.parse_email_with_ai(email)
 
         if status == "quota":
             print(f"\nDaily Gemini quota nearly reached ({config.GEMINI_DAILY_QUOTA_LIMIT}/1500). Stopping. Resume tomorrow.")
@@ -139,8 +117,16 @@ def run_sync(is_initial: bool = False) -> dict:
                 database.mark_email_ai_failed_rate_limit(email["id"])
             continue
 
+        if status == "error":
+            emails_skipped += 1
+            skip_reasons.append(f"ai-error: {email.get('id', '?')}")
+            if use_sheet_mode:
+                newly_processed_ids.append(email["id"])
+            else:
+                database.mark_email_ai_failed_rate_limit(email["id"])
+            continue
+
         if status == "success" and parsed is None:
-            # Gemini returned null (not a job email) - done forever
             emails_skipped += 1
             skip_reasons.append(f"ai-null: {email.get('id', '?')}")
             if use_sheet_mode:
@@ -152,28 +138,22 @@ def run_sync(is_initial: bool = False) -> dict:
         if status != "success" or not parsed:
             continue
 
-        # Use email date if AI didn't return valid date
-        date_applied = parsed.get("date") or email.get("date", "")
-        if not date_applied:
-            date_applied = datetime.utcnow().strftime("%Y-%m-%d")
-
+        date_applied = parsed.get("date") or email.get("date", "") or datetime.utcnow().strftime("%Y-%m-%d")
         app_type = "Internship" if parsed.get("is_internship") else "Full-time"
         company = deduplication.normalize_company(parsed["company"])
-        role = parsed["role"]  # Keep original for display
+        role = parsed["role"]
         stage = parsed["stage"]
         notes = parsed.get("notes", "")
 
-        # Stage 3: Deduplication
         match = deduplication.find_matching_application(company, role, existing_apps)
 
         if match:
-            # Update existing
             current_stage = match["stage"]
             if deduplication.should_upgrade_stage(current_stage, stage):
                 new_stage = stage
                 new_notes = notes
             else:
-                new_stage = current_stage  # Don't downgrade
+                new_stage = current_stage
                 existing_notes = match.get("notes") or ""
                 new_notes = f"{existing_notes}; {notes}".strip("; ") if existing_notes else notes
 
@@ -203,12 +183,8 @@ def run_sync(is_initial: bool = False) -> dict:
                 existing_apps.insert(0, new_app)
             else:
                 database.upsert_application(
-                    company=company,
-                    role=role,
-                    stage=stage,
-                    app_type=app_type,
-                    date_applied=date_applied,
-                    notes=notes,
+                    company=company, role=role, stage=stage,
+                    app_type=app_type, date_applied=date_applied, notes=notes,
                 )
             print(f"NEW APP: company={company} role={role} stage={stage}")
             new_applications += 1
@@ -217,10 +193,9 @@ def run_sync(is_initial: bool = False) -> dict:
             newly_processed_ids.append(email["id"])
         else:
             database.mark_email_ai_completed(email["id"])
-            existing_apps = database.get_all_applications()  # Refresh for next iteration
+            existing_apps = database.get_all_applications()
 
-    # Log sync
-    skip_reasons_str = "\n".join(skip_reasons[:50])  # Limit length
+    skip_reasons_str = "\n".join(skip_reasons[:50])
     sync_log_entry = {
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "emails_scanned": emails_scanned,
@@ -240,7 +215,6 @@ def run_sync(is_initial: bool = False) -> dict:
             is_initial_run=is_initial,
         )
 
-    # Sync to Google Sheet
     if use_sheet_mode:
         sheets_sync.append_processed_emails(spreadsheet_id, newly_processed_ids)
         existing_apps.sort(key=lambda a: a.get("last_updated", ""), reverse=True)
@@ -264,22 +238,12 @@ def run_sync(is_initial: bool = False) -> dict:
 
 
 def main() -> None:
-    """CLI entry point."""
     import argparse
     parser = argparse.ArgumentParser(description="Job Application Tracker Sync")
-    parser.add_argument(
-        "--initial",
-        action="store_true",
-        help="Initial run: scan 8 months, create sheet if needed",
-    )
-    parser.add_argument(
-        "--export",
-        action="store_true",
-        help="Export/recreate Google Sheet from local database (use if sheet was deleted)",
-    )
+    parser.add_argument("--initial", action="store_true", help="Initial run: scan 8 months")
+    parser.add_argument("--export", action="store_true", help="Recreate Google Sheet from DB")
     args = parser.parse_args()
 
-    # Export mode: recreate sheet from DB (use when sheet was deleted)
     if args.export:
         database.init_database()
         spreadsheet_id = sheets_sync.create_new_spreadsheet()
@@ -290,7 +254,6 @@ def main() -> None:
         _print_urls(spreadsheet_id)
         return
 
-    # Normal sync
     is_initial = args.initial
     stats = run_sync(is_initial=is_initial)
 
@@ -303,11 +266,8 @@ def main() -> None:
 
 
 def _print_urls(spreadsheet_id: str) -> None:
-    """Print sheet URL and Excel download link."""
-    sheet_url = sheets_sync.get_sheet_url(spreadsheet_id)
-    excel_url = sheets_sync.get_excel_download_url(spreadsheet_id)
-    print(f"\nGoogle Sheet: {sheet_url}")
-    print(f"Excel Download: {excel_url}")
+    print(f"\nGoogle Sheet: {sheets_sync.get_sheet_url(spreadsheet_id)}")
+    print(f"Excel Download: {sheets_sync.get_excel_download_url(spreadsheet_id)}")
 
 
 if __name__ == "__main__":

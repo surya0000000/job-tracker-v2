@@ -1,17 +1,15 @@
 """Configuration for Job Application Tracker."""
 
+from dotenv import load_dotenv
 from pathlib import Path
 
-# Load .env from project root before any os.environ.get()
-BASE_DIR = Path(__file__).parent
-_env_path = BASE_DIR / ".env"
-if _env_path.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_env_path)
+# Load .env from project root BEFORE any os.environ.get()
+load_dotenv(Path(__file__).parent / ".env")
 
 import os
 
 # Paths
+BASE_DIR = Path(__file__).parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 DATABASE_PATH = BASE_DIR / "applications.db"
@@ -24,9 +22,14 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Email scan window (months)
+# Email scan window
 INITIAL_SCAN_MONTHS = 8
-DAILY_SCAN_DAYS = 7  # For incremental runs, scan last 7 days
+DAILY_SCAN_DAYS = 7
+
+# Gemini API
+GEMINI_DAILY_QUOTA_LIMIT = 1400
+GEMINI_MODEL = "gemini-2.0-flash"
+MIN_SECONDS_BETWEEN_CALLS = 4
 
 # Stage priority (lower = earlier in pipeline)
 STAGE_PRIORITY = {
@@ -37,19 +40,22 @@ STAGE_PRIORITY = {
     "Interview Scheduled": 5,
     "Interviewed": 6,
     "Offer": 7,
-    "Rejected": 8,  # Terminal
-    "Withdrawn": 9,  # Terminal
+    "Rejected": 8,
+    "Withdrawn": 9,
 }
 
-# API keys from environment (.env locally, GitHub Secrets in CI)
+
 def get_gemini_api_key() -> str:
     return os.environ.get("GEMINI_API_KEY", "").strip()
+
 
 def get_google_credentials() -> str:
     return os.environ.get("GOOGLE_CREDENTIALS", "").strip()
 
+
 def get_google_token() -> str:
     return os.environ.get("GOOGLE_TOKEN", "").strip()
+
 
 def get_spreadsheet_id() -> str:
     return os.environ.get("SPREADSHEET_ID", "").strip()

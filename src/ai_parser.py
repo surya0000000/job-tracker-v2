@@ -1,10 +1,8 @@
-"""Stage 2: AI parsing with Gemini 2.0 Flash."""
+"""Stage 2: AI parsing with Gemini 2.0 Flash (google-genai package)."""
 
+from dotenv import load_dotenv
 from pathlib import Path
-_env_path = Path(__file__).parent.parent / ".env"
-if _env_path.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_env_path)
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import json
 import re
@@ -73,30 +71,21 @@ When in doubt: return null.
 A missed email is always better than a wrong entry."""
 
 VALID_STAGES = {
-    "Applied",
-    "In Review",
-    "OA/Assessment",
-    "Phone Screen",
-    "Interview Scheduled",
-    "Interviewed",
-    "Offer",
-    "Rejected",
-    "Withdrawn",
+    "Applied", "In Review", "OA/Assessment", "Phone Screen",
+    "Interview Scheduled", "Interviewed", "Offer", "Rejected", "Withdrawn",
 }
 
-BATCH_SIZE = 3
-BATCH_PAUSE_SECONDS = 2
 MIN_CONFIDENCE = 0.70
+RATE_LIMIT_WAIT_SECONDS = 60
+RATE_LIMIT_MAX_RETRIES = 3
 
 
 def _log_skip(email_id: str, reason: str) -> None:
-    """Log skip to errors.log."""
     with open(config.ERRORS_LOG_PATH, "a") as f:
         f.write(f"[{datetime.utcnow().isoformat()}] AI SKIP [{email_id}]: {reason}\n")
 
 
 def log_info(msg: str) -> None:
-    """Log info (also to stdout for visibility)."""
     line = f"[{datetime.utcnow().isoformat()}] {msg}"
     print(line)
     with open(config.ERRORS_LOG_PATH, "a") as f:
@@ -106,12 +95,9 @@ def log_info(msg: str) -> None:
 def _parse_ai_response(response_text: str, email_id: str) -> Optional[dict]:
     """Parse AI response. Returns dict or None."""
     text = (response_text or "").strip()
-
-    # Check for null
     if text.lower() == "null" or not text:
         return None
 
-    # Try to extract JSON (handle nested braces)
     start = text.find("{")
     if start == -1:
         return None
@@ -134,7 +120,6 @@ def _parse_ai_response(response_text: str, email_id: str) -> Optional[dict]:
     except json.JSONDecodeError:
         return None
 
-    # Validate required fields
     company = (data.get("company") or "").strip()
     role = (data.get("role") or "").strip()
     stage = (data.get("stage") or "").strip()
@@ -143,23 +128,19 @@ def _parse_ai_response(response_text: str, email_id: str) -> Optional[dict]:
     if not company or company.lower() == "unknown":
         _log_skip(email_id, "company field empty, null, or Unknown")
         return None
-
     if not role or role.lower() == "unknown":
         _log_skip(email_id, "role field empty, null, or Unknown")
         return None
-
     if stage not in VALID_STAGES:
         _log_skip(email_id, f"invalid stage: {stage}")
         return None
-
     if confidence < MIN_CONFIDENCE:
         _log_skip(email_id, f"low confidence: {confidence}")
         return None
 
-    # Parse date
     date_str = data.get("date") or ""
     if not re.match(r"\d{4}-\d{2}-\d{2}", date_str):
-        date_str = ""  # Will use email date as fallback
+        date_str = ""
 
     return {
         "company": company,
@@ -172,26 +153,35 @@ def _parse_ai_response(response_text: str, email_id: str) -> Optional[dict]:
     }
 
 
-def parse_email_with_ai(email: dict) -> Optional[dict]:
-    """
-    Parse single email with Gemini. Returns parsed dict or None.
-    """
-    api_key = config.get_gemini_api_key()
-    if not api_key:
-        _log_skip(email.get("id", "?"), "GEMINI_API_KEY not set")
-        return None
+def _is_429_error(e: Exception) -> bool:
+    err_str = str(e).lower()
+    return "429" in err_str or "rate limit" in err_str or "resource exhausted" in err_str
 
+
+def parse_email_with_ai(email: dict) -> tuple[str, Optional[dict]]:
+    """
+    Parse single email with Gemini. ALWAYS returns (status, result).
+    status: "success" | "rate_limit_fail" | "quota" | "error"
+    result: dict or None
+    """
     try:
-        import google.generativeai as genai
+        from src import database
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            system_instruction=SYSTEM_INSTRUCTION,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.1,
-            ),
-        )
+        api_key = config.get_gemini_api_key()
+        if not api_key:
+            _log_skip(email.get("id", "?"), "GEMINI_API_KEY not set")
+            return ("error", None)
+
+        count = database.get_daily_gemini_count()
+        if count >= config.GEMINI_DAILY_QUOTA_LIMIT:
+            return ("quota", None)
+
+        time.sleep(config.MIN_SECONDS_BETWEEN_CALLS)
+
+        from google import genai
+        from google.genai.types import GenerateContentConfig
+
+        client = genai.Client(api_key=api_key)
 
         prompt = f"""Subject: {email.get('subject', '')}
 From: {email.get('from', '')}
@@ -200,39 +190,58 @@ Date: {email.get('date', '')}
 Body (first 3000 chars):
 {(email.get('body') or '')[:3000]}"""
 
-        response = model.generate_content(prompt)
-        text = response.text if response else ""
+        def _do_call(prompt_text: str) -> str:
+            count = database.get_daily_gemini_count()
+            if count >= config.GEMINI_DAILY_QUOTA_LIMIT:
+                raise ValueError("DAILY_QUOTA_REACHED")
+            response = client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=prompt_text,
+                config=GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.1,
+                ),
+            )
+            database.increment_daily_gemini_count()
+            return response.text if response and hasattr(response, "text") else ""
+
+        text = ""
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                text = _do_call(prompt)
+                break
+            except ValueError as e:
+                if "DAILY_QUOTA_REACHED" in str(e):
+                    return ("quota", None)
+                raise
+            except Exception as e:
+                if _is_429_error(e) and attempt < RATE_LIMIT_MAX_RETRIES:
+                    log_info(f"RATE LIMIT: waiting {RATE_LIMIT_WAIT_SECONDS}s before retry {attempt + 1}/{RATE_LIMIT_MAX_RETRIES}")
+                    time.sleep(RATE_LIMIT_WAIT_SECONDS)
+                else:
+                    _log_skip(email.get("id", "?"), f"AI error: {e}")
+                    return ("rate_limit_fail", None)
 
         result = _parse_ai_response(text, email.get("id", "?"))
 
         if result:
             log_info(f"AI PARSED: company={result['company']} role={result['role']} stage={result['stage']}")
 
-        # Retry once if response wasn't valid JSON
         if result is None and text and text.lower() != "null":
-            # Maybe it was malformed - retry with stricter prompt
+            time.sleep(config.MIN_SECONDS_BETWEEN_CALLS)
             retry_prompt = prompt + "\n\nIMPORTANT: Respond with ONLY valid JSON or the exact word null. No other text."
-            response = model.generate_content(retry_prompt)
-            text = response.text if response else ""
-            result = _parse_ai_response(text, email.get("id", "?"))
+            try:
+                text = _do_call(retry_prompt)
+                result = _parse_ai_response(text, email.get("id", "?"))
+            except ValueError:
+                return ("quota", None)
+            except Exception as e:
+                if _is_429_error(e):
+                    return ("rate_limit_fail", None)
+                raise
 
-        return result
+        return ("success", result)
 
     except Exception as e:
-        _log_skip(email.get("id", "?"), f"AI error: {e}")
-        return None
-
-
-def parse_emails_batch(emails: list[dict]) -> list[tuple[dict, Optional[dict]]]:
-    """
-    Parse emails in batches of 3 with 2 second pause. Returns list of (email, parsed_result).
-    """
-    results = []
-    for i in range(0, len(emails), BATCH_SIZE):
-        batch = emails[i : i + BATCH_SIZE]
-        for email in batch:
-            parsed = parse_email_with_ai(email)
-            results.append((email, parsed))
-        if i + BATCH_SIZE < len(emails):
-            time.sleep(BATCH_PAUSE_SECONDS)
-    return results
+        _log_skip(email.get("id", "?"), f"Unexpected error: {e}")
+        return ("error", None)

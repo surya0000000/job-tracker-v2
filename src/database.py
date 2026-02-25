@@ -1,5 +1,9 @@
 """SQLite database for applications and processed email tracking."""
 
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 import sqlite3
 from datetime import datetime
 from pathlib import Path
