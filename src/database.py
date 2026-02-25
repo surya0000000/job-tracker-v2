@@ -35,7 +35,14 @@ def init_database() -> None:
 
             CREATE TABLE IF NOT EXISTS processed_emails (
                 email_id TEXT PRIMARY KEY,
-                processed_at TEXT DEFAULT CURRENT_TIMESTAMP
+                processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                ai_attempted INTEGER DEFAULT 0,
+                pre_filter_rejected INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS gemini_daily_usage (
+                date_utc TEXT PRIMARY KEY,
+                call_count INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS sync_log (
@@ -55,51 +62,130 @@ def init_database() -> None:
                 ON applications(last_updated DESC);
         """)
         conn.commit()
+
+        # Migration: add columns if they don't exist (for existing databases)
+        try:
+            conn.execute("ALTER TABLE processed_emails ADD COLUMN ai_attempted INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE processed_emails ADD COLUMN pre_filter_rejected INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
     finally:
         conn.close()
 
 
 def is_email_processed(email_id: str) -> bool:
-    """Check if email has already been processed."""
+    """Check if email has already been processed (skip forever)."""
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "SELECT 1 FROM processed_emails WHERE email_id = ?", (email_id,)
+            "SELECT 1 FROM processed_emails WHERE email_id = ? AND (ai_attempted = 1 OR pre_filter_rejected = 1)",
+            (email_id,),
         )
         return cursor.fetchone() is not None
     finally:
         conn.close()
 
 
-def get_all_processed_email_ids() -> set[str]:
-    """Get all processed email IDs (for efficient batch skip check)."""
+def get_skip_forever_ids() -> set[str]:
+    """Returns IDs where ai_attempted=1 OR pre_filter_rejected=1 (skip these forever)."""
     conn = get_connection()
     try:
-        cursor = conn.execute("SELECT email_id FROM processed_emails")
+        cursor = conn.execute(
+            "SELECT email_id FROM processed_emails WHERE ai_attempted = 1 OR pre_filter_rejected = 1"
+        )
         return {str(row[0]) for row in cursor.fetchall()}
     finally:
         conn.close()
 
 
-def get_processed_email_count() -> int:
-    """Get count of already-processed emails."""
+def get_retry_ids() -> set[str]:
+    """Returns IDs where ai_attempted=0 AND pre_filter_rejected=0 (retry these - hit rate limit)."""
     conn = get_connection()
     try:
-        cursor = conn.execute("SELECT COUNT(*) FROM processed_emails")
-        return cursor.fetchone()[0]
+        cursor = conn.execute(
+            "SELECT email_id FROM processed_emails WHERE ai_attempted = 0 AND pre_filter_rejected = 0"
+        )
+        return {str(row[0]) for row in cursor.fetchall()}
     finally:
         conn.close()
 
 
-def mark_email_processed(email_id: str) -> None:
-    """Mark email as processed."""
+def mark_email_pre_filter_rejected(email_id: str) -> None:
+    """Pre-filter rejected: sets pre_filter_rejected=1, ai_attempted=0."""
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT OR IGNORE INTO processed_emails (email_id) VALUES (?)",
+            """INSERT OR REPLACE INTO processed_emails (email_id, ai_attempted, pre_filter_rejected)
+               VALUES (?, 0, 1)""",
             (email_id,),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_email_ai_completed(email_id: str) -> None:
+    """Gemini returned successfully: sets ai_attempted=1."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO processed_emails (email_id, ai_attempted, pre_filter_rejected)
+               VALUES (?, 1, 0)""",
+            (email_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_email_ai_failed_rate_limit(email_id: str) -> None:
+    """AI hit rate limit: sets ai_attempted=0, pre_filter_rejected=0 so it gets retried."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO processed_emails (email_id, ai_attempted, pre_filter_rejected)
+               VALUES (?, 0, 0)""",
+            (email_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_daily_gemini_count() -> int:
+    """Get today's Gemini API call count (UTC). Resets at midnight."""
+    conn = get_connection()
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        cursor = conn.execute(
+            "SELECT call_count FROM gemini_daily_usage WHERE date_utc = ?", (today,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def increment_daily_gemini_count() -> int:
+    """Increment today's count, return new total."""
+    conn = get_connection()
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        conn.execute(
+            """INSERT INTO gemini_daily_usage (date_utc, call_count) VALUES (?, 1)
+               ON CONFLICT(date_utc) DO UPDATE SET call_count = call_count + 1""",
+            (today,),
+        )
+        conn.commit()
+        cursor = conn.execute(
+            "SELECT call_count FROM gemini_daily_usage WHERE date_utc = ?", (today,)
+        )
+        return cursor.fetchone()[0]
     finally:
         conn.close()
 
@@ -214,7 +300,7 @@ def log_sync(
     try:
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         conn.execute("""
-            INSERT INTO sync_log (timestamp, emails_scanned, new_applications, 
+            INSERT INTO sync_log (timestamp, emails_scanned, new_applications,
                 statuses_updated, emails_skipped, skip_reasons, is_initial_run)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (now, emails_scanned, new_applications, statuses_updated,
