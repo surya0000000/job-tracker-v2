@@ -1,5 +1,9 @@
 """Gmail API client for fetching job application emails."""
 
+from dotenv import load_dotenv
+from pathlib import Path
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 import base64
 import json
 import os

@@ -1,10 +1,8 @@
 """Google Sheets sync - 3 tabs: Applications, Summary, Sync Log."""
 
+from dotenv import load_dotenv
 from pathlib import Path
-_env_path = Path(__file__).parent.parent / ".env"
-if _env_path.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_env_path)
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import json
 import os
