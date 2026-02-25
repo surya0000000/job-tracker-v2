@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -86,7 +87,11 @@ def run_sync(is_initial: bool = False) -> dict:
     else:
         existing_apps = database.get_all_applications()
 
-    for email in to_process:
+    for idx, email in enumerate(to_process):
+        # Rate limit: 2 second pause every 3 emails (AI batch pacing)
+        if idx > 0 and idx % 3 == 0:
+            time.sleep(2)
+
         # Stage 1: Pre-filter
         reject_reason = pre_filter.pre_filter(email)
         if reject_reason:
