@@ -1,5 +1,11 @@
 """Main sync orchestration - runs the full pipeline."""
 
+from pathlib import Path
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_path)
+
 import json
 import os
 import sys
@@ -46,33 +52,36 @@ def run_sync(is_initial: bool = False) -> dict:
         months_back = None
         days_back = config.DAILY_SCAN_DAYS
 
-    # Get or create spreadsheet
+    # Get or create spreadsheet - ALWAYS use existing from .env if set
     spreadsheet_id = config.get_spreadsheet_id()
+    if spreadsheet_id:
+        print(f"Loaded SPREADSHEET_ID: {spreadsheet_id} from .env")
     if not spreadsheet_id:
         spreadsheet_id = sheets_sync.create_new_spreadsheet()
+        config.save_spreadsheet_id_to_env(spreadsheet_id)
         print(f"\n>>> CREATED NEW SPREADSHEET <<<")
-        print(f"Add this to GitHub Secrets as SPREADSHEET_ID: {spreadsheet_id}")
+        print(f"Saved SPREADSHEET_ID to .env: {spreadsheet_id}")
 
     # Get processed email IDs (from Sheet in CI, from DB locally)
+    # Load BEFORE fetch so we skip already-done emails and don't re-process
     if use_sheet_mode:
         processed_ids = sheets_sync.read_processed_emails(spreadsheet_id)
+        print(f"Found {len(processed_ids)} already-processed emails in Sheet, will skip these")
     else:
-        processed_ids = None  # Will check DB per-email
+        processed_ids = database.get_all_processed_email_ids()
+        print(f"Found {len(processed_ids)} already-processed emails in database, will skip these")
 
     # Fetch emails
+    print("Starting Gmail fetch...")
     emails = list(gmail_client.fetch_emails(months_back=months_back or 0, days_back=days_back))
     emails_scanned = len(emails)
 
-    # Filter out already processed
+    # Filter out already processed (critical: skip these to avoid re-processing)
     to_process = []
     newly_processed_ids = []
     for email in emails:
-        if use_sheet_mode:
-            if email["id"] not in processed_ids:
-                to_process.append(email)
-        else:
-            if not database.is_email_processed(email["id"]):
-                to_process.append(email)
+        if email["id"] not in processed_ids:
+            to_process.append(email)
 
     new_applications = 0
     statuses_updated = 0
@@ -91,8 +100,9 @@ def run_sync(is_initial: bool = False) -> dict:
         # Rate limit: 2 second pause every 3 emails (AI batch pacing)
         if idx > 0 and idx % 3 == 0:
             time.sleep(2)
+            print(f"Progress: {idx + 1} emails processed, {new_applications + statuses_updated} applications found so far")
 
-        # Stage 1: Pre-filter
+        # Stage 1: Pre-filter (logs PRE-FILTER PASS when it passes)
         reject_reason = pre_filter.pre_filter(email)
         if reject_reason:
             emails_skipped += 1
@@ -139,6 +149,9 @@ def run_sync(is_initial: bool = False) -> dict:
                 existing_notes = match.get("notes") or ""
                 new_notes = f"{existing_notes}; {notes}".strip("; ") if existing_notes else notes
 
+            print(f"DEDUP MATCH: {company}/{role} matched existing {match.get('company')}/{match.get('role')}")
+            print(f"UPDATED: company={company} stage {current_stage}→{new_stage}")
+
             if use_sheet_mode:
                 for i, app in enumerate(existing_apps):
                     if app.get("company") == match.get("company") and app.get("role") == match.get("role"):
@@ -169,6 +182,7 @@ def run_sync(is_initial: bool = False) -> dict:
                     date_applied=date_applied,
                     notes=notes,
                 )
+            print(f"NEW APP: company={company} role={role} stage={stage}")
             new_applications += 1
 
         if use_sheet_mode:
@@ -241,9 +255,10 @@ def main() -> None:
     if args.export:
         database.init_database()
         spreadsheet_id = sheets_sync.create_new_spreadsheet()
+        config.save_spreadsheet_id_to_env(spreadsheet_id)
         sheets_sync.sync_all(spreadsheet_id)
         print(f"\n>>> RECREATED SPREADSHEET <<<")
-        print(f"Update GitHub Secret SPREADSHEET_ID to: {spreadsheet_id}")
+        print(f"Saved SPREADSHEET_ID to .env: {spreadsheet_id}")
         _print_urls(spreadsheet_id)
         return
 

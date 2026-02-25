@@ -1,5 +1,11 @@
 """Stage 1: Pre-filter - discard obvious junk before AI (no cost, instant)."""
 
+from pathlib import Path
+_env_path = Path(__file__).parent.parent / ".env"
+if _env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_path)
+
 import re
 from datetime import datetime
 from typing import Optional
@@ -119,6 +125,16 @@ def _log_rejection(email_id: str, reason: str) -> None:
         f.write(f"[{datetime.utcnow().isoformat()}] PRE-FILTER REJECT [{email_id}]: {reason}\n")
 
 
+def _log_pass(email_id: str, subject: str, sender: str) -> None:
+    """Log pre-filter pass."""
+    subj_short = (subject or "")[:60]
+    sender_short = (sender or "")[:50]
+    line = f"[{datetime.utcnow().isoformat()}] PRE-FILTER PASS: subject={subj_short} sender={sender_short}"
+    print(line)
+    with open(config.ERRORS_LOG_PATH, "a") as f:
+        f.write(line + "\n")
+
+
 def pre_filter(email: dict) -> Optional[str]:
     """
     Run pre-filter on email. Returns None if PASS, or rejection reason string if REJECT.
@@ -167,4 +183,5 @@ def pre_filter(email: dict) -> Optional[str]:
         _log_rejection(email_id, reason)
         return reason
 
+    _log_pass(email_id, email.get("subject", ""), email.get("from", ""))
     return None  # PASS

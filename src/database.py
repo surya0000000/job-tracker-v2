@@ -71,6 +71,26 @@ def is_email_processed(email_id: str) -> bool:
         conn.close()
 
 
+def get_all_processed_email_ids() -> set[str]:
+    """Get all processed email IDs (for efficient batch skip check)."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute("SELECT email_id FROM processed_emails")
+        return {str(row[0]) for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_processed_email_count() -> int:
+    """Get count of already-processed emails."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute("SELECT COUNT(*) FROM processed_emails")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
 def mark_email_processed(email_id: str) -> None:
     """Mark email as processed."""
     conn = get_connection()

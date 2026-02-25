@@ -1,10 +1,17 @@
 """Configuration for Job Application Tracker."""
 
-import os
 from pathlib import Path
 
-# Paths
+# Load .env from project root before any os.environ.get()
 BASE_DIR = Path(__file__).parent
+_env_path = BASE_DIR / ".env"
+if _env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_env_path)
+
+import os
+
+# Paths
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 DATABASE_PATH = BASE_DIR / "applications.db"
@@ -34,15 +41,34 @@ STAGE_PRIORITY = {
     "Withdrawn": 9,  # Terminal
 }
 
-# API keys from environment (GitHub Secrets)
+# API keys from environment (.env locally, GitHub Secrets in CI)
 def get_gemini_api_key() -> str:
-    return os.environ.get("GEMINI_API_KEY", "")
+    return os.environ.get("GEMINI_API_KEY", "").strip()
 
 def get_google_credentials() -> str:
-    return os.environ.get("GOOGLE_CREDENTIALS", "")
+    return os.environ.get("GOOGLE_CREDENTIALS", "").strip()
 
 def get_google_token() -> str:
-    return os.environ.get("GOOGLE_TOKEN", "")
+    return os.environ.get("GOOGLE_TOKEN", "").strip()
 
 def get_spreadsheet_id() -> str:
-    return os.environ.get("SPREADSHEET_ID", "")
+    return os.environ.get("SPREADSHEET_ID", "").strip()
+
+
+def save_spreadsheet_id_to_env(spreadsheet_id: str) -> None:
+    """Save SPREADSHEET_ID to .env file so it persists across restarts."""
+    env_path = BASE_DIR / ".env"
+    lines = []
+    key_found = False
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                if line.strip().startswith("SPREADSHEET_ID="):
+                    lines.append(f"SPREADSHEET_ID={spreadsheet_id}\n")
+                    key_found = True
+                else:
+                    lines.append(line)
+    if not key_found:
+        lines.append(f"SPREADSHEET_ID={spreadsheet_id}\n")
+    with open(env_path, "w") as f:
+        f.writelines(lines)
