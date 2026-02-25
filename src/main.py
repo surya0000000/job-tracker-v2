@@ -62,25 +62,30 @@ def run_sync(is_initial: bool = False) -> dict:
         print(f"\n>>> CREATED NEW SPREADSHEET <<<")
         print(f"Saved SPREADSHEET_ID to .env: {spreadsheet_id}")
 
-    # Get processed email IDs (from Sheet in CI, from DB locally)
-    # Load BEFORE fetch so we skip already-done emails and don't re-process
+    # Get emails to skip forever (from Sheet in CI, from DB locally with checkpoint/resume)
     if use_sheet_mode:
-        processed_ids = sheets_sync.read_processed_emails(spreadsheet_id)
-        print(f"Found {len(processed_ids)} already-processed emails in Sheet, will skip these")
+        skip_forever_ids = sheets_sync.read_processed_emails(spreadsheet_id)
+        print(f"Found {len(skip_forever_ids)} already-processed emails in Sheet, will skip these")
+        retry_count = 0  # Sheet mode doesn't support retry tracking
     else:
-        processed_ids = database.get_all_processed_email_ids()
-        print(f"Found {len(processed_ids)} already-processed emails in database, will skip these")
+        skip_forever_ids = database.get_skip_forever_ids()
+        retry_ids = database.get_retry_ids()
+        daily_count = database.get_daily_gemini_count()
+        print(f"Found {len(skip_forever_ids)} emails to skip forever (completed or pre-filter rejected)")
+        if retry_ids:
+            print(f"Found {len(retry_ids)} emails to retry from previous rate-limited run")
+        print(f"Gemini API calls today: {daily_count}/{config.GEMINI_DAILY_QUOTA_LIMIT}")
 
     # Fetch emails
     print("Starting Gmail fetch...")
     emails = list(gmail_client.fetch_emails(months_back=months_back or 0, days_back=days_back))
     emails_scanned = len(emails)
 
-    # Filter out already processed (critical: skip these to avoid re-processing)
+    # Filter: only process emails NOT in skip_forever (includes new + retry from rate limits)
     to_process = []
     newly_processed_ids = []
     for email in emails:
-        if email["id"] not in processed_ids:
+        if email["id"] not in skip_forever_ids:
             to_process.append(email)
 
     new_applications = 0
@@ -97,10 +102,15 @@ def run_sync(is_initial: bool = False) -> dict:
         existing_apps = database.get_all_applications()
 
     for idx, email in enumerate(to_process):
-        # Rate limit: 2 second pause every 3 emails (AI batch pacing)
+        # Progress print every 3 emails (4s pause is inside parse_email_with_ai)
         if idx > 0 and idx % 3 == 0:
-            time.sleep(2)
             print(f"Progress: {idx + 1} emails processed, {new_applications + statuses_updated} applications found so far")
+
+        # Check daily quota before AI call (local mode only)
+        if not use_sheet_mode:
+            if database.get_daily_gemini_count() >= config.GEMINI_DAILY_QUOTA_LIMIT:
+                print(f"\nDaily Gemini quota nearly reached ({config.GEMINI_DAILY_QUOTA_LIMIT}/1500). Stopping. Resume tomorrow.")
+                break
 
         # Stage 1: Pre-filter (logs PRE-FILTER PASS when it passes)
         reject_reason = pre_filter.pre_filter(email)
@@ -110,18 +120,36 @@ def run_sync(is_initial: bool = False) -> dict:
             if use_sheet_mode:
                 newly_processed_ids.append(email["id"])
             else:
-                database.mark_email_processed(email["id"])
+                database.mark_email_pre_filter_rejected(email["id"])
             continue
 
-        # Stage 2: AI parsing
-        parsed = ai_parser.parse_email_with_ai(email)
-        if not parsed:
+        # Stage 2: AI parsing (4s between calls, 429 retry 3x, daily limit check)
+        status, parsed = ai_parser.parse_email_with_ai(email, check_daily_quota=not use_sheet_mode)
+
+        if status == "quota":
+            print(f"\nDaily Gemini quota nearly reached ({config.GEMINI_DAILY_QUOTA_LIMIT}/1500). Stopping. Resume tomorrow.")
+            break
+
+        if status == "rate_limit_fail":
             emails_skipped += 1
-            skip_reasons.append(f"ai-skip: {email.get('id', '?')}")
+            skip_reasons.append(f"ai-rate-limit-fail: {email.get('id', '?')}")
             if use_sheet_mode:
                 newly_processed_ids.append(email["id"])
             else:
-                database.mark_email_processed(email["id"])
+                database.mark_email_ai_failed_rate_limit(email["id"])
+            continue
+
+        if status == "success" and parsed is None:
+            # Gemini returned null (not a job email) - done forever
+            emails_skipped += 1
+            skip_reasons.append(f"ai-null: {email.get('id', '?')}")
+            if use_sheet_mode:
+                newly_processed_ids.append(email["id"])
+            else:
+                database.mark_email_ai_completed(email["id"])
+            continue
+
+        if status != "success" or not parsed:
             continue
 
         # Use email date if AI didn't return valid date
@@ -188,7 +216,7 @@ def run_sync(is_initial: bool = False) -> dict:
         if use_sheet_mode:
             newly_processed_ids.append(email["id"])
         else:
-            database.mark_email_processed(email["id"])
+            database.mark_email_ai_completed(email["id"])
             existing_apps = database.get_all_applications()  # Refresh for next iteration
 
     # Log sync
