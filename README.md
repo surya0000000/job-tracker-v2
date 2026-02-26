@@ -2,6 +2,8 @@
 
 Automatically reads your Gmail and tracks every job and internship you've applied to. Syncs to a private Google Sheet with color-coded stages, deduplication, and daily automation via GitHub Actions.
 
+> **New to this?** Follow **[SETUP_GUIDE.md](SETUP_GUIDE.md)** for step-by-step instructions.
+
 ## What It Does
 
 - **Connects to Gmail** and finds application-related emails from the last 8 months (first run) or recent emails (daily runs)
