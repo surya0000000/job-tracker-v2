@@ -22,11 +22,17 @@ GMAIL_SCOPES = [
 INITIAL_SCAN_MONTHS = 8
 DAILY_SCAN_DAYS = 7
 
-# Gemini: use flash-lite for higher rate limits (15 RPM, 1000 RPD)
+# AI provider: "groq" or "gemini"
+# Groq: 30 RPM, 14,400 RPD (llama-3.1-8b) - FREE, no CC, faster
+# Gemini: 15 RPM, 1000 RPD - FREE from aistudio.google.com (no Google AI Pro needed!)
+AI_PROVIDER = "groq"  # Prefer Groq: more requests, no rate limit hassle
 GEMINI_MODEL = "gemini-2.0-flash-lite"
-GEMINI_DAILY_QUOTA_LIMIT = 800  # Stay under 1000
-MIN_SECONDS_BETWEEN_CALLS = 6   # 15 RPM = 1 per 4s, use 6s for safety
-MAX_AI_CALLS_PER_RUN = 50       # Cap so we don't burn quota
+GEMINI_DAILY_QUOTA_LIMIT = 800
+GROQ_MODEL = "llama-3.1-8b-instant"  # 30 RPM, 14.4K RPD free
+GROQ_DAILY_QUOTA_LIMIT = 12000      # Stay under 14.4K
+def get_min_seconds_between_calls() -> int:
+    return 3 if get_ai_provider() == "groq" else 6  # Groq 30 RPM; Gemini 15 RPM
+MAX_AI_CALLS_PER_RUN = 200          # Higher cap with Groq
 
 STAGE_PRIORITY = {
     "Applied": 1, "In Review": 2, "OA/Assessment": 3, "Phone Screen": 4,
@@ -36,6 +42,17 @@ STAGE_PRIORITY = {
 
 def get_gemini_api_key() -> str:
     return os.environ.get("GEMINI_API_KEY", "").strip()
+
+
+def get_groq_api_key() -> str:
+    return os.environ.get("GROQ_API_KEY", "").strip()
+
+
+def get_ai_provider() -> str:
+    """groq if GROQ_API_KEY set, else gemini. Groq has 14x more free requests."""
+    if get_groq_api_key():
+        return "groq"
+    return "gemini"
 
 
 def get_google_credentials() -> str:

@@ -1,4 +1,4 @@
-"""AI parsing with Gemini 2.0 Flash-Lite (15 RPM, 1000 RPD - quota friendly)."""
+"""AI parsing - Groq (30 RPM, 14.4K RPD) or Gemini (15 RPM, 1K RPD). Both FREE."""
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -61,43 +61,71 @@ def _parse_response(text: str, email_id: str) -> Optional[dict]:
     }
 
 
+def _call_groq(email: dict) -> Optional[str]:
+    """Groq: 30 RPM, 14.4K RPD - free, no subscription."""
+    from src.email_cleaner import clean_body
+    from groq import Groq
+
+    client = Groq(api_key=config.get_groq_api_key())
+    body_clean = clean_body(email.get("body"))
+    prompt = f"Subject: {email.get('subject','')}\nFrom: {email.get('from','')}\n\nBody:\n{body_clean}"
+    full_prompt = f"{PROMPT}\n\n{prompt}"
+
+    resp = client.chat.completions.create(
+        model=config.GROQ_MODEL,
+        messages=[{"role": "user", "content": full_prompt}],
+        temperature=0.1,
+    )
+    return resp.choices[0].message.content if resp.choices else ""
+
+
+def _call_gemini(email: dict) -> Optional[str]:
+    """Gemini: 15 RPM, 1000 RPD - free from aistudio.google.com (no Google AI Pro!)."""
+    from google import genai
+    from google.genai.types import GenerateContentConfig
+    from src.email_cleaner import clean_body
+
+    client = genai.Client(api_key=config.get_gemini_api_key())
+    body_clean = clean_body(email.get("body"))
+    prompt = f"Subject: {email.get('subject','')}\nFrom: {email.get('from','')}\n\nBody:\n{body_clean}"
+    full_prompt = f"{PROMPT}\n\n{prompt}"
+
+    resp = client.models.generate_content(
+        model=config.GEMINI_MODEL,
+        contents=full_prompt,
+        config=GenerateContentConfig(temperature=0.1),
+    )
+    return resp.text if resp and hasattr(resp, "text") else ""
+
+
 def parse_email_with_ai(email: dict) -> tuple[str, Optional[dict]]:
-    """Always returns (status, result). status: success|rate_limit_fail|quota|error"""
+    """Always returns (status, result). Uses Groq if available (more free requests), else Gemini."""
     try:
         from src import database
 
-        if not config.get_gemini_api_key():
+        provider = config.get_ai_provider()
+        api_key = config.get_groq_api_key() if provider == "groq" else config.get_gemini_api_key()
+        if not api_key:
+            _log("No GROQ_API_KEY or GEMINI_API_KEY in .env")
             return ("error", None)
 
-        if database.get_daily_gemini_count() >= config.GEMINI_DAILY_QUOTA_LIMIT:
+        quota_limit = config.GROQ_DAILY_QUOTA_LIMIT if provider == "groq" else config.GEMINI_DAILY_QUOTA_LIMIT
+        if database.get_daily_gemini_count() >= quota_limit:
             return ("quota", None)
 
-        time.sleep(config.MIN_SECONDS_BETWEEN_CALLS)
-
-        from google import genai
-        from google.genai.types import GenerateContentConfig
-        from src.email_cleaner import clean_body
-
-        client = genai.Client(api_key=config.get_gemini_api_key())
-        body_clean = clean_body(email.get("body"))
-        prompt = f"Subject: {email.get('subject','')}\nFrom: {email.get('from','')}\n\nBody:\n{body_clean}"
+        time.sleep(config.get_min_seconds_between_calls())
 
         for attempt in range(4):
             try:
-                if database.get_daily_gemini_count() >= config.GEMINI_DAILY_QUOTA_LIMIT:
+                if database.get_daily_gemini_count() >= quota_limit:
                     return ("quota", None)
-                resp = client.models.generate_content(
-                    model=config.GEMINI_MODEL,
-                    contents=f"{PROMPT}\n\n{prompt}",
-                    config=GenerateContentConfig(temperature=0.1),
-                )
+                text = _call_groq(email) if provider == "groq" else _call_gemini(email)
                 database.increment_daily_gemini_count()
-                text = resp.text if resp and hasattr(resp, "text") else ""
                 result = _parse_response(text, email.get("id", "?"))
                 return ("success", result)
             except Exception as e:
                 err = str(e).lower()
-                if "429" in err or "resource" in err and attempt < 3:
+                if ("429" in err or "rate" in err or "limit" in err) and attempt < 3:
                     _log(f"RATE LIMIT: wait 60s retry {attempt + 1}/3")
                     time.sleep(60)
                 else:

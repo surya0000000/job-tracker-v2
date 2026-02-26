@@ -50,7 +50,9 @@ def run_sync(is_initial: bool = False) -> dict:
     print(f"Found {len(skip_ids)} emails to skip forever")
     print(f"Found {len(retry_ids)} emails to retry from previous run")
     if not use_sheet:
-        print(f"Gemini calls today: {database.get_daily_gemini_count()}/{config.GEMINI_DAILY_QUOTA_LIMIT}")
+        prov = config.get_ai_provider()
+        limit = config.GROQ_DAILY_QUOTA_LIMIT if prov == "groq" else config.GEMINI_DAILY_QUOTA_LIMIT
+        print(f"AI: {prov.upper()} | Calls today: {database.get_daily_gemini_count()}/{limit}")
 
     print("Fetching Gmail...")
     emails = list(gmail_client.fetch_emails(months_back=months, days_back=days))
@@ -73,8 +75,9 @@ def run_sync(is_initial: bool = False) -> dict:
             print(f"\nReached AI cap ({config.MAX_AI_CALLS_PER_RUN}) for this run. Resume tomorrow.")
             break
 
-        if not use_sheet and database.get_daily_gemini_count() >= config.GEMINI_DAILY_QUOTA_LIMIT:
-            print(f"\nDaily Gemini quota reached. Resume tomorrow.")
+        quota = config.GROQ_DAILY_QUOTA_LIMIT if config.get_ai_provider() == "groq" else config.GEMINI_DAILY_QUOTA_LIMIT
+        if not use_sheet and database.get_daily_gemini_count() >= quota:
+            print(f"\nDaily AI quota reached. Resume tomorrow.")
             break
 
         if pre_filter.pre_filter(email):
@@ -95,9 +98,9 @@ def run_sync(is_initial: bool = False) -> dict:
             used_ai = True
             ai_calls_this_run += 1
 
-            if status == "quota":
-                print(f"\nDaily quota reached. Stopping.")
-                break
+        if status == "quota":
+            print(f"\nDaily AI quota reached. Stopping. Resume tomorrow.")
+            break
             if status in ("rate_limit_fail", "error"):
                 if not use_sheet:
                     database.mark_email_ai_failed_rate_limit(email["id"])

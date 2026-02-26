@@ -20,11 +20,22 @@ Automatically reads your Gmail and tracks every job and internship you've applie
 
 ## Setup (Under 20 Minutes)
 
-### 1. Get a Gemini API Key
+### 1. Get an AI API Key (pick one — both FREE, no subscription)
 
-1. Go to [aistudio.google.com](https://aistudio.google.com)
-2. Create a free API key
-3. Save it — you'll add it as a GitHub secret
+**Option A: Groq (recommended — 14x more free requests)**  
+- 30 RPM, **14,400 requests/day**  
+- No credit card, no subscription  
+1. Go to [console.groq.com](https://console.groq.com) → Create API Key  
+2. Add `GROQ_API_KEY=...` to your `.env`
+
+**Option B: Gemini**  
+- 15 RPM, 1,000 requests/day  
+- **No Google AI Pro needed** — just a regular Google account  
+1. Go to [aistudio.google.com](https://aistudio.google.com/apikey)  
+2. Create API key (free, no credit card)  
+3. Add `GEMINI_API_KEY=...` to your `.env`
+
+If both are set, Groq is used (higher limits).
 
 ### 2. Enable Google APIs
 
@@ -64,7 +75,7 @@ python run.py --initial
 
 | Secret | Value |
 |-------|-------|
-| `GEMINI_API_KEY` | Your Gemini API key from step 1 |
+| `GEMINI_API_KEY` | Or `GROQ_API_KEY` — see step 1 (Groq preferred) |
 | `GOOGLE_CREDENTIALS` | Full contents of `credentials.json` (paste entire JSON) |
 | `GOOGLE_TOKEN` | Full contents of `token.json` (created after first run) |
 | `SPREADSHEET_ID` | The ID printed after first run (from the sheet URL) |
