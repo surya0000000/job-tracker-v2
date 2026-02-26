@@ -107,11 +107,13 @@ The script prints:
 
 ## How It Works
 
-1. **Pre-filter** — Aggressive rules (like [auto-job-tracker](https://github.com/surya0000000/auto-job-tracker)) discard junk before any API calls
-2. **Rule extraction** — Extracts company/role from sender domain and subject patterns (no AI)
-3. **AI parsing** — Only when rules fail: Gemini 2.0 Flash-Lite (15 RPM, 1000 RPD, quota-friendly)
-4. **Deduplication** — Company + role matching; one application = one row
-5. **Stage upgrade** — Only moves forward; Rejected/Withdrawn always apply
+1. **Gmail API filtering** — Search query filters at fetch time (from [jobseeker-analytics](https://github.com/jobba-help/jobseeker-analytics)) — fewer emails fetched
+2. **Pre-filter** — Aggressive rules (from [auto-job-tracker](https://github.com/surya0000000/auto-job-tracker)) discard junk before any API calls
+3. **Rule extraction** — Company/role from sender domain, subject, Greenhouse "application to X" (from [track-app](https://github.com/ryankamiri/track-app), [KenzaBouqdir](https://github.com/KenzaBouqdir/job-application-tracker))
+4. **Email body cleaning** — Strip HTML, footers; truncate to 400 words (from track-app) — 60-80% fewer tokens
+5. **AI parsing** — Only when rules fail: Gemini 2.0 Flash-Lite (15 RPM, 1000 RPD)
+6. **Deduplication** — Company + role matching; one application = one row
+7. **Stage upgrade** — Only moves forward; Rejected/Withdrawn always apply
 
 ## Timezone
 

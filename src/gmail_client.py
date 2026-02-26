@@ -63,11 +63,19 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
+# Gmail query: filter AT API level - fewer emails fetched (jobseeker-analytics)
+def _build_gmail_filter_query(after_str: str) -> str:
+    """Build Gmail search - only fetch emails likely to be job-related."""
+    # (subject terms OR from domains) AND not spam
+    q = f'after:{after_str} -in:trash (subject:application OR subject:applied OR subject:interview OR subject:assessment OR subject:offer OR subject:unfortunately OR from:greenhouse OR from:lever OR from:workday OR from:ashbyhq) -subject:newsletter -subject:"job alert"'
+    return q
+
+
 def build_search_query(months_back: int) -> str:
     """Build Gmail search query for the given time range."""
     after_date = datetime.utcnow() - timedelta(days=months_back * 30)
     after_str = after_date.strftime("%Y/%m/%d")
-    return f"after:{after_str}"
+    return _build_gmail_filter_query(after_str)
 
 
 def fetch_emails(
@@ -82,7 +90,8 @@ def fetch_emails(
 
     if days_back is not None:
         after_date = datetime.utcnow() - timedelta(days=days_back)
-        query = f"after:{after_date.strftime('%Y/%m/%d')}"
+        after_str = after_date.strftime("%Y/%m/%d")
+        query = _build_gmail_filter_query(after_str)
     else:
         query = build_search_query(months_back or config.INITIAL_SCAN_MONTHS)
 

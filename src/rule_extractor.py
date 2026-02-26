@@ -102,23 +102,25 @@ def _domain_to_company(domain: str) -> Optional[str]:
 
 
 def _stage_from_text(text: str) -> str:
-    """Detect stage from subject+body keywords."""
+    """Detect stage from subject+body keywords (Kenza, track-app, jobseeker)."""
     t = (text or "").lower()
-    if any(x in t for x in ["unfortunately", "not selected", "not moving forward", "declined", "we've decided"]):
+    rej = ["unfortunately", "not selected", "not moving forward", "declined", "we've decided",
+           "other candidates", "position filled", "pursue other", "not be considered"]
+    if any(x in t for x in rej):
         return "Rejected"
     if any(x in t for x in ["offer", "pleased to offer", "we'd like to extend"]):
         return "Offer"
-    if any(x in t for x in ["interview", "phone screen", "onsite", "technical interview"]):
+    if any(x in t for x in ["interview", "phone screen", "onsite", "technical interview", "schedule a call", "video call"]):
         return "Interview Scheduled"
-    if any(x in t for x in ["assessment", "coding challenge", "online test"]):
+    if any(x in t for x in ["assessment", "coding challenge", "online test", "codesignal", "hackerrank"]):
         return "OA/Assessment"
-    if any(x in t for x in ["application received", "we received your", "thank you for applying"]):
+    if any(x in t for x in ["application received", "we received your", "thank you for applying", "submitted successfully"]):
         return "Applied"
     return "Applied"
 
 
 def _role_from_subject(subject: str) -> Optional[str]:
-    """Extract role from common subject patterns."""
+    """Extract role from common subject patterns (Kenza, track-app)."""
     s = (subject or "").strip()
     patterns = [
         r"(?:application|applied)\s+(?:for|to)\s+(?:the\s+)?(.+?)\s+(?:position\s+)?(?:at|@)",
@@ -126,6 +128,9 @@ def _role_from_subject(subject: str) -> Optional[str]:
         r"(?:position|role):\s*(.+?)(?:\s+at|\s*$)",
         r"(.+?)\s+(?:intern|engineer|developer|analyst)\s*(?:position|role)?\s*(?:at|@)",
         r"your\s+application\s+for\s+(.+?)(?:\s+at|\s*$)",
+        r"for\s+the\s+([\w\s-]{5,50}?)\s+(?:role|position)",
+        r"(?:role:\s*|position:\s*)([\w\s-]{5,50}?)(?:\s+at|\s*[-–|]|$)",
+        r"(software engineer|data engineer|ml engineer|machine learning|data scientist|backend|frontend|full.?stack)",
     ]
     for p in patterns:
         m = re.search(p, s, re.IGNORECASE)
@@ -150,11 +155,17 @@ def try_extract(email: dict) -> Optional[dict]:
 
     # Need at least company from sender
     if not company:
-        # Try body for "at Company" or "from Company"
-        m = re.search(r"(?:at|from|@)\s+([A-Z][a-zA-Z0-9\s&.-]{2,40}?)(?:\s+(?:for|–|-|\n)|$)", body)
-        if m:
-            company = normalize_company(m.group(1))
-        else:
+        # Greenhouse/Karat/Byteboard: "application to X" in body (track-app)
+        if "greenhouse" in from_addr.lower() or "karat" in from_addr.lower() or "byteboard" in from_addr.lower():
+            m = re.search(r"application\s+to\s+([A-Z][a-zA-Z0-9\s&.-]{2,40})", body, re.IGNORECASE)
+            if m:
+                company = normalize_company(m.group(1))
+        # Generic: "at Company" or "from Company"
+        if not company:
+            m = re.search(r"(?:at|from|@)\s+([A-Z][a-zA-Z0-9\s&.-]{2,40}?)(?:\s+(?:for|–|-|\n)|$)", body)
+            if m:
+                company = normalize_company(m.group(1))
+        if not company:
             return None
 
     role = _role_from_subject(subject)

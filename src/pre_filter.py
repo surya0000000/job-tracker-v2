@@ -27,6 +27,7 @@ MUST_PASS_SUBJECTS = [
     "next steps",
 ]
 
+# From jobseeker-analytics applied_email_filter exclude
 HARD_REJECT = [
     "job alert",
     "jobs you might like",
@@ -35,14 +36,21 @@ HARD_REJECT = [
     "digest",
     "viewed your profile",
     "connection request",
+    "do you want to finish your application",
+    "you have new application updates this week",
+    "matched new opportunities",
+    "found jobs",
+    "mock interview",
+    "mock interview",
 ]
 
 PERSONAL_DOMAINS = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com"}
 
 ATS_DOMAINS = [
-    "greenhouse.io", "lever.co", "workday.com", "myworkdayjobs.com",
+    "greenhouse.io", "greenhouse-mail.io", "lever.co", "workday.com", "myworkdayjobs.com",
     "ashbyhq.com", "smartrecruiters.com", "jobvite.com", "icims.com",
     "jazz.co", "recruitee.com", "bamboohr.com", "rippling.com", "dover.com",
+    "wellfound.com", "cardinalrefer.com", "hire.lever.co", "us.greenhouse-mail.io",
 ]
 
 

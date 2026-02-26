@@ -76,9 +76,11 @@ def parse_email_with_ai(email: dict) -> tuple[str, Optional[dict]]:
 
         from google import genai
         from google.genai.types import GenerateContentConfig
+        from src.email_cleaner import clean_body
 
         client = genai.Client(api_key=config.get_gemini_api_key())
-        prompt = f"Subject: {email.get('subject','')}\nFrom: {email.get('from','')}\n\nBody:\n{(email.get('body') or '')[:2500]}"
+        body_clean = clean_body(email.get("body"))
+        prompt = f"Subject: {email.get('subject','')}\nFrom: {email.get('from','')}\n\nBody:\n{body_clean}"
 
         for attempt in range(4):
             try:
