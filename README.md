@@ -2,6 +2,8 @@
 
 Automatically reads your Gmail and tracks every job and internship you've applied to. Syncs to a private Google Sheet with color-coded stages, deduplication, and daily automation via GitHub Actions.
 
+> **New to this?** Follow **[SETUP_GUIDE.md](SETUP_GUIDE.md)** for step-by-step instructions.
+
 ## What It Does
 
 - **Connects to Gmail** and finds application-related emails from the last 8 months (first run) or recent emails (daily runs)
@@ -20,11 +22,22 @@ Automatically reads your Gmail and tracks every job and internship you've applie
 
 ## Setup (Under 20 Minutes)
 
-### 1. Get a Gemini API Key
+### 1. Get an AI API Key (pick one — both FREE, no subscription)
 
-1. Go to [aistudio.google.com](https://aistudio.google.com)
-2. Create a free API key
-3. Save it — you'll add it as a GitHub secret
+**Option A: Groq (recommended — 14x more free requests)**  
+- 30 RPM, **14,400 requests/day**  
+- No credit card, no subscription  
+1. Go to [console.groq.com](https://console.groq.com) → Create API Key  
+2. Add `GROQ_API_KEY=...` to your `.env`
+
+**Option B: Gemini**  
+- 15 RPM, 1,000 requests/day  
+- **No Google AI Pro needed** — just a regular Google account  
+1. Go to [aistudio.google.com](https://aistudio.google.com/apikey)  
+2. Create API key (free, no credit card)  
+3. Add `GEMINI_API_KEY=...` to your `.env`
+
+If both are set, Groq is used (higher limits).
 
 ### 2. Enable Google APIs
 
@@ -64,7 +77,7 @@ python run.py --initial
 
 | Secret | Value |
 |-------|-------|
-| `GEMINI_API_KEY` | Your Gemini API key from step 1 |
+| `GEMINI_API_KEY` | Or `GROQ_API_KEY` — see step 1 (Groq preferred) |
 | `GOOGLE_CREDENTIALS` | Full contents of `credentials.json` (paste entire JSON) |
 | `GOOGLE_TOKEN` | Full contents of `token.json` (created after first run) |
 | `SPREADSHEET_ID` | The ID printed after first run (from the sheet URL) |
@@ -107,10 +120,13 @@ The script prints:
 
 ## How It Works
 
-1. **Pre-filter** — Instant rules discard obvious junk (job alerts, personal domains, etc.) before any AI calls
-2. **AI parsing** — Gemini 1.5 Flash classifies each email; low confidence or missing company/role → skip
-3. **Deduplication** — Company + role matching with normalization (e.g., "Google LLC" = "Google", "SWE" = "Software Engineer") so one application = one row
-4. **Stage upgrade** — Only moves forward (never downgrades); Rejected/Withdrawn always apply
+1. **Gmail API filtering** — Search query filters at fetch time (from [jobseeker-analytics](https://github.com/jobba-help/jobseeker-analytics)) — fewer emails fetched
+2. **Pre-filter** — Aggressive rules (from [auto-job-tracker](https://github.com/surya0000000/auto-job-tracker)) discard junk before any API calls
+3. **Rule extraction** — Company/role from sender domain, subject, Greenhouse "application to X" (from [track-app](https://github.com/ryankamiri/track-app), [KenzaBouqdir](https://github.com/KenzaBouqdir/job-application-tracker))
+4. **Email body cleaning** — Strip HTML, footers; truncate to 400 words (from track-app) — 60-80% fewer tokens
+5. **AI parsing** — Only when rules fail: Gemini 2.0 Flash-Lite (15 RPM, 1000 RPD)
+6. **Deduplication** — Company + role matching; one application = one row
+7. **Stage upgrade** — Only moves forward; Rejected/Withdrawn always apply
 
 ## Timezone
 

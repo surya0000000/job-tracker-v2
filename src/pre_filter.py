@@ -1,4 +1,4 @@
-"""Stage 1: Pre-filter - discard obvious junk before AI (no cost, instant)."""
+"""Pre-filter: discard junk BEFORE any AI. Stricter = fewer API calls."""
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -10,176 +10,71 @@ from typing import Optional
 
 import config
 
+# Like auto-job-tracker: only these pass (aggressive filter)
+MUST_PASS_SUBJECTS = [
+    "applied",
+    "application",
+    "thanks for applying",
+    "thank you for applying",
+    "thanks from",
+    "follow-up",
+    "update",
+    "recruiting",
+    "we received",
+    "interview",
+    "offer",
+    "unfortunately",
+    "next steps",
+]
 
-# Hard reject subject phrases (case insensitive)
-HARD_REJECT_SUBJECTS = [
+# From jobseeker-analytics applied_email_filter exclude
+HARD_REJECT = [
     "job alert",
     "jobs you might like",
     "recommended jobs",
-    "new jobs matching",
-    "people are applying",
-    "jobs near you",
-    "top job picks",
-    "weekly digest",
     "newsletter",
-    "salary insights",
+    "digest",
     "viewed your profile",
     "connection request",
-    "grow your network",
-    "who's hiring",
-    "jobs based on your profile",
-    "open to work",
-    "x people applied",
-    "see who's hiring",
+    "do you want to finish your application",
+    "you have new application updates this week",
+    "matched new opportunities",
+    "found jobs",
+    "mock interview",
+    "mock interview",
 ]
 
-# Must-pass subject phrases (at least one required)
-MUST_PASS_SUBJECTS = [
-    "application",
-    "applied",
-    "interview",
-    "offer",
-    "internship",
-    "position",
-    "role",
-    "hiring",
-    "candidate",
-    "recruiting",
-    "assessment",
-    "screening",
-    "unfortunately",
-    "next steps",
-    "moving forward",
-    "thank you for applying",
-    "we received",
-    "application update",
-    "your application",
-    "application confirmation",
-    "job offer",
-    "pleased to",
-    "decision",
-    "consideration",
-    "move forward",
-    "background check",
-    "onboarding",
-]
+PERSONAL_DOMAINS = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com"}
 
-# Known ATS/recruiting platform domains
 ATS_DOMAINS = [
-    "greenhouse.io",
-    "lever.co",
-    "workday.com",
-    "myworkdayjobs.com",
-    "ashbyhq.com",
-    "smartrecruiters.com",
-    "jobvite.com",
-    "icims.com",
-    "taleo.net",
-    "successfactors.com",
-    "brassring.com",
-    "jazz.co",
-    "recruitee.com",
-    "bamboohr.com",
-    "rippling.com",
-    "dover.com",
-]
-
-# Personal email domains (reject)
-PERSONAL_DOMAINS = [
-    "gmail.com",
-    "yahoo.com",
-    "hotmail.com",
-    "outlook.com",
-    "icloud.com",
-    "aol.com",
-    "protonmail.com",
-    "live.com",
-]
-
-# Job board blast rules: (domain, subject_contains_any)
-JOB_BOARD_BLAST_RULES = [
-    ("linkedin.com", ["alert", "recommendation", "digest", "jobs", "people", "network", "profile"]),
-    ("indeed.com", ["alert", "matches", "digest"]),
-    ("glassdoor.com", ["alert", "matches"]),
-]
-
-# Always reject these domains (blast emails)
-ALWAYS_REJECT_DOMAINS = [
-    "ziprecruiter.com",
-    "dice.com",
-    "monster.com",
+    "greenhouse.io", "greenhouse-mail.io", "lever.co", "workday.com", "myworkdayjobs.com",
+    "ashbyhq.com", "smartrecruiters.com", "jobvite.com", "icims.com",
+    "jazz.co", "recruitee.com", "bamboohr.com", "rippling.com", "dover.com",
+    "wellfound.com", "cardinalrefer.com", "hire.lever.co", "us.greenhouse-mail.io",
 ]
 
 
-def _extract_domain(email_addr: str) -> str:
-    """Extract domain from email address."""
-    match = re.search(r"@([\w.-]+)", email_addr, re.IGNORECASE)
-    return match.group(1).lower() if match else ""
-
-
-def _log_rejection(email_id: str, reason: str) -> None:
-    """Log rejection to errors.log."""
-    with open(config.ERRORS_LOG_PATH, "a") as f:
-        f.write(f"[{datetime.utcnow().isoformat()}] PRE-FILTER REJECT [{email_id}]: {reason}\n")
-
-
-def _log_pass(email_id: str, subject: str, sender: str) -> None:
-    """Log pre-filter pass."""
-    subj_short = (subject or "")[:60]
-    sender_short = (sender or "")[:50]
-    line = f"[{datetime.utcnow().isoformat()}] PRE-FILTER PASS: subject={subj_short} sender={sender_short}"
-    print(line)
-    with open(config.ERRORS_LOG_PATH, "a") as f:
-        f.write(line + "\n")
+def _domain(from_addr: str) -> str:
+    m = re.search(r"@([\w.-]+)", (from_addr or "").lower())
+    return m.group(1) if m else ""
 
 
 def pre_filter(email: dict) -> Optional[str]:
-    """
-    Run pre-filter on email. Returns None if PASS, or rejection reason string if REJECT.
-    """
-    email_id = email.get("id", "?")
+    """None = PASS, else rejection reason."""
     subject = (email.get("subject") or "").lower()
-    from_addr = (email.get("from") or "").lower()
-    domain = _extract_domain(from_addr)
+    domain = _domain(email.get("from") or "")
 
-    # HARD REJECT: subject contains junk phrases
-    for phrase in HARD_REJECT_SUBJECTS:
+    for phrase in HARD_REJECT:
         if phrase in subject:
-            reason = f"subject contains '{phrase}'"
-            _log_rejection(email_id, reason)
-            return reason
+            return f"reject: {phrase}"
 
-    # HARD REJECT: personal domains
     if domain in PERSONAL_DOMAINS:
-        reason = f"sender domain is personal: {domain}"
-        _log_rejection(email_id, reason)
-        return reason
+        return "reject: personal domain"
 
-    # HARD REJECT: always reject job board blasts
-    if domain in ALWAYS_REJECT_DOMAINS:
-        reason = f"sender is job board blast: {domain}"
-        _log_rejection(email_id, reason)
-        return reason
+    if any(x in domain for x in ["linkedin.com", "indeed.com", "glassdoor.com", "ziprecruiter.com"]):
+        return "reject: job board"
 
-    # HARD REJECT: LinkedIn/Indeed/Glassdoor with blast-like subjects
-    for blast_domain, blast_subjects in JOB_BOARD_BLAST_RULES:
-        if blast_domain in domain:
-            for phrase in blast_subjects:
-                if phrase in subject:
-                    reason = f"from {domain} and subject contains '{phrase}' (job board blast)"
-                    _log_rejection(email_id, reason)
-                    return reason
+    if not any(p in subject for p in MUST_PASS_SUBJECTS) and not any(a in domain for a in ATS_DOMAINS):
+        return "reject: no application keywords"
 
-    # MUST PASS: subject must contain at least one relevant phrase
-    subject_passes = any(phrase in subject for phrase in MUST_PASS_SUBJECTS)
-
-    # OR: sender is known ATS
-    domain_is_ats = any(ats in domain for ats in ATS_DOMAINS)
-
-    if not subject_passes and not domain_is_ats:
-        reason = "subject does not contain application-related keywords and sender is not known ATS"
-        _log_rejection(email_id, reason)
-        return reason
-
-    _log_pass(email_id, email.get("subject", ""), email.get("from", ""))
-    return None  # PASS
+    return None

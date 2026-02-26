@@ -3,50 +3,56 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Load .env from project root BEFORE any os.environ.get()
 load_dotenv(Path(__file__).parent / ".env")
 
 import os
 
-# Paths
 BASE_DIR = Path(__file__).parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 DATABASE_PATH = BASE_DIR / "applications.db"
 ERRORS_LOG_PATH = BASE_DIR / "errors.log"
 
-# Gmail
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Email scan window
 INITIAL_SCAN_MONTHS = 8
 DAILY_SCAN_DAYS = 7
 
-# Gemini API
-GEMINI_DAILY_QUOTA_LIMIT = 1400
-GEMINI_MODEL = "gemini-2.0-flash"
-MIN_SECONDS_BETWEEN_CALLS = 4
+# AI provider: "groq" or "gemini"
+# Groq: 30 RPM, 14,400 RPD (llama-3.1-8b) - FREE, no CC, faster
+# Gemini: 15 RPM, 1000 RPD - FREE from aistudio.google.com (no Google AI Pro needed!)
+AI_PROVIDER = "groq"  # Prefer Groq: more requests, no rate limit hassle
+GEMINI_MODEL = "gemini-2.0-flash-lite"
+GEMINI_DAILY_QUOTA_LIMIT = 800
+GROQ_MODEL = "llama-3.1-8b-instant"  # 30 RPM, 14.4K RPD free
+GROQ_DAILY_QUOTA_LIMIT = 12000      # Stay under 14.4K
+def get_min_seconds_between_calls() -> int:
+    return 3 if get_ai_provider() == "groq" else 6  # Groq 30 RPM; Gemini 15 RPM
+MAX_AI_CALLS_PER_RUN = 200          # Higher cap with Groq
 
-# Stage priority (lower = earlier in pipeline)
 STAGE_PRIORITY = {
-    "Applied": 1,
-    "In Review": 2,
-    "OA/Assessment": 3,
-    "Phone Screen": 4,
-    "Interview Scheduled": 5,
-    "Interviewed": 6,
-    "Offer": 7,
-    "Rejected": 8,
-    "Withdrawn": 9,
+    "Applied": 1, "In Review": 2, "OA/Assessment": 3, "Phone Screen": 4,
+    "Interview Scheduled": 5, "Interviewed": 6, "Offer": 7, "Rejected": 8, "Withdrawn": 9,
 }
 
 
 def get_gemini_api_key() -> str:
     return os.environ.get("GEMINI_API_KEY", "").strip()
+
+
+def get_groq_api_key() -> str:
+    return os.environ.get("GROQ_API_KEY", "").strip()
+
+
+def get_ai_provider() -> str:
+    """groq if GROQ_API_KEY set, else gemini. Groq has 14x more free requests."""
+    if get_groq_api_key():
+        return "groq"
+    return "gemini"
 
 
 def get_google_credentials() -> str:
@@ -62,7 +68,6 @@ def get_spreadsheet_id() -> str:
 
 
 def save_spreadsheet_id_to_env(spreadsheet_id: str) -> None:
-    """Save SPREADSHEET_ID to .env file so it persists across restarts."""
     env_path = BASE_DIR / ".env"
     lines = []
     key_found = False
