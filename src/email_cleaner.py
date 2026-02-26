@@ -1,9 +1,9 @@
-"""Email body cleaning - reduce tokens 60-80% (from track-app, jobseeker-analytics)."""
+"""Email body cleaning - reduce tokens before AI (track-app, jobseeker-analytics)."""
 
 import re
 from typing import Optional
 
-MAX_BODY_WORDS = 400  # Truncate to save tokens
+MAX_BODY_CHARS = 1500  # Job emails convey key info in first 1,500 chars
 
 
 def clean_body(body: Optional[str]) -> str:
@@ -46,8 +46,7 @@ def clean_body(body: Optional[str]) -> str:
     result = re.sub(r"\n{3,}", "\n\n", result)
     result = re.sub(r" {2,}", " ", result)
 
-    words = result.split()
-    if len(words) > MAX_BODY_WORDS:
-        result = " ".join(words[:MAX_BODY_WORDS]) + "\n[...truncated...]"
+    if len(result) > MAX_BODY_CHARS:
+        result = result[:MAX_BODY_CHARS] + "\n[...truncated...]"
 
     return result.strip()

@@ -28,7 +28,7 @@ DAILY_SCAN_DAYS = 7
 AI_PROVIDER = "groq"  # Prefer Groq: more requests, no rate limit hassle
 GEMINI_MODEL = "gemini-2.0-flash-lite"
 GEMINI_DAILY_QUOTA_LIMIT = 1500     # Actual daily API quota
-GROQ_MODEL = "llama-3.1-8b-instant"  # 30 RPM, 14.4K RPD free
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Higher token limit, better accuracy
 GROQ_DAILY_QUOTA_LIMIT = 12000      # Actual daily API quota
 # No per-run cap — only daily quotas apply
 
