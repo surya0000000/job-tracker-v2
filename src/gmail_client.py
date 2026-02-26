@@ -63,12 +63,42 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
-# Gmail query: filter AT API level - fewer emails fetched (jobseeker-analytics)
+# Gmail query: broad OR logic to catch all job application emails
 def _build_gmail_filter_query(after_str: str) -> str:
-    """Build Gmail search - only fetch emails likely to be job-related."""
-    # (subject terms OR from domains) AND not spam
-    q = f'after:{after_str} -in:trash (subject:application OR subject:applied OR subject:interview OR subject:assessment OR subject:offer OR subject:unfortunately OR from:greenhouse OR from:lever OR from:workday OR from:ashbyhq) -subject:newsletter -subject:"job alert"'
-    return q
+    """Build broad Gmail search - catch all job-related emails, minimal exclusions."""
+    # Subject keywords (any match)
+    subject_terms = (
+        "subject:application OR subject:applied OR subject:apply OR subject:interview OR "
+        "subject:assessment OR subject:offer OR subject:unfortunately OR subject:regret OR "
+        "subject:position OR subject:role OR subject:opportunity OR subject:candidate OR "
+        "subject:hiring OR subject:recruit OR subject:decision OR subject:congratulations OR "
+        "subject:rejection OR subject:declined OR subject:onsite OR "
+        'subject:"thank you for applying" OR subject:"your application" OR subject:"application received" OR '
+        'subject:"moving forward" OR subject:"next steps" OR subject:"keep your resume" OR '
+        'subject:"future opportunities" OR subject:"phone screen" OR subject:"technical screen" OR '
+        'subject:"coding challenge" OR subject:"take home" OR subject:"final round" OR '
+        'subject:"reference check" OR subject:"background check" OR subject:"start date" OR '
+        'subject:"not selected" OR subject:"other candidates"'
+    )
+    # ATS and recruiter domains (any match)
+    from_domains = (
+        "from:greenhouse OR from:lever OR from:workday OR from:ashbyhq OR from:icims OR "
+        "from:taleo OR from:smartrecruiters OR from:jobvite OR from:myworkdayjobs OR "
+        "from:successfactors OR from:brassring OR from:bamboohr OR from:recruitee OR "
+        "from:pinpointhq OR from:dover OR from:rippling OR from:jobscore OR from:ultipro OR "
+        "from:oracle OR from:sapjobs OR from:eightfold OR from:beamery OR from:phenom OR "
+        "from:jobscan OR from:simplyhired OR from:ziprecruiter OR from:indeed OR "
+        "from:linkedin OR from:glassdoor OR from:wellfound OR from:angellist OR from:handshake OR "
+        "from:careers OR from:hiring OR from:talent OR from:recruit OR from:noreply OR "
+        'from:donotreply OR from:"no-reply" OR from:notification OR from:jobs OR from:hr OR from:people OR from:team'
+    )
+    # Exclusions: job alerts, newsletters, trash, spam (NOT -from:linkedin to keep real application emails)
+    exclusions = (
+        '-subject:"job alert" -subject:"jobs you may like" -subject:"recommended jobs" '
+        '-subject:"people also viewed" -subject:newsletter -subject:unsubscribe '
+        "-in:trash -in:spam"
+    )
+    return f'after:{after_str} ({subject_terms} OR {from_domains}) {exclusions}'
 
 
 def build_search_query(months_back: int) -> str:
@@ -95,64 +125,54 @@ def fetch_emails(
     else:
         query = build_search_query(months_back or config.INITIAL_SCAN_MONTHS)
 
-    # Fetch message IDs
-    results = service.users().messages().list(
+    # Paginate through ALL pages (no cap) — Gmail returns up to 500 per request
+    all_message_refs = []
+    response = service.users().messages().list(
         userId="me",
         q=query,
-        maxResults=500,
     ).execute()
-
-    messages = results.get("messages", [])
-    page_token = results.get("nextPageToken")
-
-    while messages or page_token:
-        for msg_ref in messages:
-            try:
-                msg = service.users().messages().get(
-                    userId="me",
-                    id=msg_ref["id"],
-                    format="full",
-                ).execute()
-
-                headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
-                subject = headers.get("subject", "")
-                from_addr = headers.get("from", "")
-
-                # Parse date
-                date_str = headers.get("date", "")
-                try:
-                    dt = parsedate_to_datetime(date_str)
-                    date_iso = dt.strftime("%Y-%m-%d")
-                except Exception:
-                    date_iso = datetime.utcnow().strftime("%Y-%m-%d")
-
-                # Get body
-                body = _extract_body(msg.get("payload", {}))
-
-                yield {
-                    "id": msg["id"],
-                    "thread_id": msg.get("threadId", ""),
-                    "subject": subject,
-                    "from": from_addr,
-                    "date": date_iso,
-                    "body": body,
-                }
-            except Exception as e:
-                # Log but continue
-                _log_error(f"Failed to fetch email {msg_ref.get('id', '?')}: {e}")
-                continue
-
-        if not page_token:
-            break
-
-        results = service.users().messages().list(
+    all_message_refs.extend(response.get("messages", []))
+    while "nextPageToken" in response:
+        response = service.users().messages().list(
             userId="me",
             q=query,
-            maxResults=500,
-            pageToken=page_token,
+            pageToken=response["nextPageToken"],
         ).execute()
-        messages = results.get("messages", [])
-        page_token = results.get("nextPageToken")
+        all_message_refs.extend(response.get("messages", []))
+
+    for msg_ref in all_message_refs:
+        try:
+            msg = service.users().messages().get(
+                userId="me",
+                id=msg_ref["id"],
+                format="full",
+            ).execute()
+
+            headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            subject = headers.get("subject", "")
+            from_addr = headers.get("from", "")
+
+            # Parse date
+            date_str = headers.get("date", "")
+            try:
+                dt = parsedate_to_datetime(date_str)
+                date_iso = dt.strftime("%Y-%m-%d")
+            except Exception:
+                date_iso = datetime.utcnow().strftime("%Y-%m-%d")
+
+            # Get body
+            body = _extract_body(msg.get("payload", {}))
+
+            yield {
+                "id": msg["id"],
+                "thread_id": msg.get("threadId", ""),
+                "subject": subject,
+                "from": from_addr,
+                "date": date_iso,
+                "body": body,
+            }
+        except Exception as e:
+            _log_error(f"Failed to fetch email {msg_ref.get('id', '?')}: {e}")
 
 
 def _extract_body(payload: dict) -> str:
