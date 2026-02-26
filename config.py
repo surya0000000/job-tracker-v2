@@ -27,12 +27,13 @@ DAILY_SCAN_DAYS = 7
 # Gemini: 15 RPM, 1000 RPD - FREE from aistudio.google.com (no Google AI Pro needed!)
 AI_PROVIDER = "groq"  # Prefer Groq: more requests, no rate limit hassle
 GEMINI_MODEL = "gemini-2.0-flash-lite"
-GEMINI_DAILY_QUOTA_LIMIT = 800
+GEMINI_DAILY_QUOTA_LIMIT = 1500     # Actual daily API quota
 GROQ_MODEL = "llama-3.1-8b-instant"  # 30 RPM, 14.4K RPD free
-GROQ_DAILY_QUOTA_LIMIT = 12000      # Stay under 14.4K
+GROQ_DAILY_QUOTA_LIMIT = 12000      # Actual daily API quota
+# No per-run cap — only daily quotas apply
+
 def get_min_seconds_between_calls() -> int:
     return 3 if get_ai_provider() == "groq" else 6  # Groq 30 RPM; Gemini 15 RPM
-MAX_AI_CALLS_PER_RUN = 200          # Higher cap with Groq
 
 STAGE_PRIORITY = {
     "Applied": 1, "In Review": 2, "OA/Assessment": 3, "Phone Screen": 4,

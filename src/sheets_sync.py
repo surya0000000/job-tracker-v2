@@ -61,6 +61,32 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 
+def get_sheet_id(spreadsheet_id: str, sheet_name: str) -> Optional[int]:
+    """Get the integer sheetId for a tab by name. Never use hardcoded 0."""
+    service = get_sheets_service()
+    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    for sheet in meta.get("sheets", []):
+        if sheet.get("properties", {}).get("title") == sheet_name:
+            return sheet["properties"]["sheetId"]
+    return None
+
+
+def _get_or_create_sheet_id(spreadsheet_id: str, sheet_name: str, hidden: bool = False) -> int:
+    """Get sheetId for tab, creating it if it doesn't exist."""
+    sid = get_sheet_id(spreadsheet_id, sheet_name)
+    if sid is not None:
+        return sid
+    service = get_sheets_service()
+    service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": sheet_name, "hidden": hidden}}}]},
+    ).execute()
+    sid = get_sheet_id(spreadsheet_id, sheet_name)
+    if sid is None:
+        raise ValueError(f"Failed to create or find sheet '{sheet_name}'")
+    return sid
+
+
 def create_new_spreadsheet(title: str = "Job Application Tracker") -> str:
     """Create new Google Sheet, return spreadsheet ID."""
     service = get_sheets_service()
@@ -146,6 +172,7 @@ def _sync_summary_from_data(spreadsheet_id: str, apps: list[dict]) -> None:
 def _write_applications(spreadsheet_id: str, apps: list[dict]) -> None:
     """Write applications to sheet with colors."""
     service = get_sheets_service()
+    sheet_id = _get_or_create_sheet_id(spreadsheet_id, "Applications")
     headers = ["Company", "Role", "Stage", "Type", "Date Applied", "Last Updated", "Notes"]
     rows = [headers]
     for app in apps:
@@ -167,7 +194,7 @@ def _write_applications(spreadsheet_id: str, apps: list[dict]) -> None:
             spreadsheetId=spreadsheet_id, range=range_name,
             valueInputOption="USER_ENTERED", body={"values": rows},
         ).execute()
-    # Apply colors
+    # Apply colors using real sheetId
     def hex_to_rgb(hex_str):
         hex_str = hex_str.lstrip("#")
         return tuple(int(hex_str[i:i+2], 16) / 255 for i in (0, 2, 4))
@@ -179,7 +206,7 @@ def _write_applications(spreadsheet_id: str, apps: list[dict]) -> None:
             r, g, b = hex_to_rgb(hex_color)
             color_requests.append({
                 "repeatCell": {
-                    "range": {"sheetId": 0, "startRowIndex": row_idx - 1, "endRowIndex": row_idx},
+                    "range": {"sheetId": sheet_id, "startRowIndex": row_idx - 1, "endRowIndex": row_idx},
                     "cell": {"userEnteredFormat": {"backgroundColor": {"red": r, "green": g, "blue": b}}},
                     "fields": "userEnteredFormat.backgroundColor",
                 }
