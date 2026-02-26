@@ -136,25 +136,26 @@ def run_sync(is_initial: bool = False) -> dict:
                         existing[i] = {**a, "stage": new_stage, "notes": new_notes}
                         break
             else:
-                database.update_application(match["id"], new_stage, new_notes)
+                database.update_application(match["id"], new_stage, new_notes)  # Immediate save
             updated += 1
         else:
-            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            new_app = {
-                "company": company, "role": role, "stage": stage, "type": app_type,
-                "date_applied": date_applied, "last_updated": now, "notes": notes,
-            }
+            # New application: save to DB immediately (do not batch) — survives mid-run stops
             if use_sheet:
+                now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                new_app = {
+                    "company": company, "role": role, "stage": stage, "type": app_type,
+                    "date_applied": date_applied, "last_updated": now, "notes": notes,
+                }
                 existing.insert(0, new_app)
             else:
-                database.upsert_application(company, role, stage, app_type, date_applied, notes)
+                database.upsert_application(company, role, stage, app_type, date_applied, notes)  # Immediate save
             new_apps += 1
 
-        if use_sheet:
-            newly_processed.append(email["id"])
-        else:
+        if not use_sheet:
             database.mark_email_ai_completed(email["id"])
             existing = database.get_all_applications()
+        else:
+            newly_processed.append(email["id"])
 
         if (idx + 1) % 5 == 0:
             print(f"Progress: {idx + 1} processed, {new_apps + updated} applications")
