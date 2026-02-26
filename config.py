@@ -3,45 +3,34 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Load .env from project root BEFORE any os.environ.get()
 load_dotenv(Path(__file__).parent / ".env")
 
 import os
 
-# Paths
 BASE_DIR = Path(__file__).parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 TOKEN_PATH = BASE_DIR / "token.json"
 DATABASE_PATH = BASE_DIR / "applications.db"
 ERRORS_LOG_PATH = BASE_DIR / "errors.log"
 
-# Gmail
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Email scan window
 INITIAL_SCAN_MONTHS = 8
 DAILY_SCAN_DAYS = 7
 
-# Gemini API
-GEMINI_DAILY_QUOTA_LIMIT = 1400
-GEMINI_MODEL = "gemini-2.0-flash"
-MIN_SECONDS_BETWEEN_CALLS = 4
+# Gemini: use flash-lite for higher rate limits (15 RPM, 1000 RPD)
+GEMINI_MODEL = "gemini-2.0-flash-lite"
+GEMINI_DAILY_QUOTA_LIMIT = 800  # Stay under 1000
+MIN_SECONDS_BETWEEN_CALLS = 6   # 15 RPM = 1 per 4s, use 6s for safety
+MAX_AI_CALLS_PER_RUN = 50       # Cap so we don't burn quota
 
-# Stage priority (lower = earlier in pipeline)
 STAGE_PRIORITY = {
-    "Applied": 1,
-    "In Review": 2,
-    "OA/Assessment": 3,
-    "Phone Screen": 4,
-    "Interview Scheduled": 5,
-    "Interviewed": 6,
-    "Offer": 7,
-    "Rejected": 8,
-    "Withdrawn": 9,
+    "Applied": 1, "In Review": 2, "OA/Assessment": 3, "Phone Screen": 4,
+    "Interview Scheduled": 5, "Interviewed": 6, "Offer": 7, "Rejected": 8, "Withdrawn": 9,
 }
 
 
@@ -62,7 +51,6 @@ def get_spreadsheet_id() -> str:
 
 
 def save_spreadsheet_id_to_env(spreadsheet_id: str) -> None:
-    """Save SPREADSHEET_ID to .env file so it persists across restarts."""
     env_path = BASE_DIR / ".env"
     lines = []
     key_found = False

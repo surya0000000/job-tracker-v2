@@ -107,10 +107,11 @@ The script prints:
 
 ## How It Works
 
-1. **Pre-filter** — Instant rules discard obvious junk (job alerts, personal domains, etc.) before any AI calls
-2. **AI parsing** — Gemini 1.5 Flash classifies each email; low confidence or missing company/role → skip
-3. **Deduplication** — Company + role matching with normalization (e.g., "Google LLC" = "Google", "SWE" = "Software Engineer") so one application = one row
-4. **Stage upgrade** — Only moves forward (never downgrades); Rejected/Withdrawn always apply
+1. **Pre-filter** — Aggressive rules (like [auto-job-tracker](https://github.com/surya0000000/auto-job-tracker)) discard junk before any API calls
+2. **Rule extraction** — Extracts company/role from sender domain and subject patterns (no AI)
+3. **AI parsing** — Only when rules fail: Gemini 2.0 Flash-Lite (15 RPM, 1000 RPD, quota-friendly)
+4. **Deduplication** — Company + role matching; one application = one row
+5. **Stage upgrade** — Only moves forward; Rejected/Withdrawn always apply
 
 ## Timezone
 
