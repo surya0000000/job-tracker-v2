@@ -72,25 +72,28 @@ def _build_gmail_filter_query(after_str: str) -> str:
         "subject:assessment OR subject:offer OR subject:unfortunately OR subject:regret OR "
         "subject:position OR subject:role OR subject:opportunity OR subject:candidate OR "
         "subject:hiring OR subject:recruit OR subject:decision OR subject:congratulations OR "
-        "subject:rejection OR subject:declined OR subject:onsite OR "
-        'subject:"thank you for applying" OR subject:"your application" OR subject:"application received" OR '
+        "subject:rejection OR subject:declined OR subject:onsite OR subject:update OR "
+        'subject:"thank you for applying" OR subject:"thank you for your interest" OR '
+        'subject:"your application" OR subject:"application received" OR subject:"application is in" OR '
+        'subject:"we\'ve got your" OR subject:"we received" OR subject:"confirmation" OR subject:confirmed OR '
         'subject:"moving forward" OR subject:"next steps" OR subject:"keep your resume" OR '
         'subject:"future opportunities" OR subject:"phone screen" OR subject:"technical screen" OR '
         'subject:"coding challenge" OR subject:"take home" OR subject:"final round" OR '
         'subject:"reference check" OR subject:"background check" OR subject:"start date" OR '
-        'subject:"not selected" OR subject:"other candidates"'
+        'subject:"not selected" OR subject:"other candidates" OR subject:careers'
     )
     # ATS and recruiter domains (any match)
     from_domains = (
         "from:greenhouse OR from:lever OR from:workday OR from:ashbyhq OR from:icims OR "
-        "from:taleo OR from:smartrecruiters OR from:jobvite OR from:myworkdayjobs OR "
+        "from:taleo OR from:smartrecruiters OR from:jobvite OR from:myworkdayjobs OR from:myworkday OR "
         "from:successfactors OR from:brassring OR from:bamboohr OR from:recruitee OR "
         "from:pinpointhq OR from:dover OR from:rippling OR from:jobscore OR from:ultipro OR "
         "from:oracle OR from:sapjobs OR from:eightfold OR from:beamery OR from:phenom OR "
         "from:jobscan OR from:simplyhired OR from:ziprecruiter OR from:indeed OR "
         "from:linkedin OR from:glassdoor OR from:wellfound OR from:angellist OR from:handshake OR "
-        "from:careers OR from:hiring OR from:talent OR from:recruit OR from:noreply OR "
-        'from:donotreply OR from:"no-reply" OR from:notification OR from:jobs OR from:hr OR from:people OR from:team'
+        "from:brex OR from:launchdarkly OR from:bytedance OR from:careers OR from:hiring OR "
+        "from:talent OR from:recruit OR from:noreply OR from:donotreply OR "
+        'from:"no-reply" OR from:notification OR from:jobs OR from:hr OR from:people OR from:team'
     )
     # Exclusions: job alerts, newsletters, trash, spam (NOT -from:linkedin to keep real application emails)
     exclusions = (
