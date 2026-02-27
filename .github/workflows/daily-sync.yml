@@ -5,7 +5,16 @@ on:
     # Run daily at 8:00 AM UTC
     - cron: "0 8 * * *"
   workflow_dispatch:
-    # Allow manual trigger from Actions tab
+    inputs:
+      mode:
+        description: "Which models to run for AI cleaning"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - both
+          - gemini-only
+          - chatgpt-only
 
 jobs:
   sync:
@@ -40,3 +49,41 @@ jobs:
           path: errors.log
           retention-days: 7
         continue-on-error: true
+
+  ai-clean:
+    needs: sync
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+          echo '${{ secrets.GOOGLE_TOKEN }}' > token.json
+
+      - name: Run AI sheet cleaning
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          GOOGLE_TOKEN: ${{ secrets.GOOGLE_TOKEN }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'both' }}"
+          if [ "$MODE" = "gemini-only" ]; then
+            python clean_sheet.py --gemini-only
+          elif [ "$MODE" = "chatgpt-only" ]; then
+            python clean_sheet.py --chatgpt-only
+          else
+            python clean_sheet.py
+          fi
