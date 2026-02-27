@@ -16,15 +16,28 @@ MUST_PASS_SUBJECTS = [
     "application",
     "thanks for applying",
     "thank you for applying",
+    "thank you for your interest",
+    "thanks for your interest",
+    "your interest",
     "thanks from",
     "follow-up",
     "update",
     "recruiting",
     "we received",
+    "we've got your",
+    "your application",
+    "application is in",
+    "application received",
     "interview",
     "offer",
     "unfortunately",
     "next steps",
+    "confirmation",
+    "confirmed",
+    "careers",
+    "position",
+    "role",
+    "candidate",
 ]
 
 # From jobseeker-analytics applied_email_filter exclude
@@ -51,6 +64,8 @@ ATS_DOMAINS = [
     "ashbyhq.com", "smartrecruiters.com", "jobvite.com", "icims.com",
     "jazz.co", "recruitee.com", "bamboohr.com", "rippling.com", "dover.com",
     "wellfound.com", "cardinalrefer.com", "hire.lever.co", "us.greenhouse-mail.io",
+    "myworkday.com", "wd1.myworkday", "wd3.myworkday", "wd5.myworkday",
+    "brex.com", "launchdarkly.com", "bytedance.com", "careers.bytedance",
 ]
 
 
