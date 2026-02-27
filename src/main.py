@@ -29,6 +29,7 @@ def run_sync(is_initial: bool = False) -> dict:
     use_sheet = _is_ci()
     if not use_sheet:
         database.init_database()
+        ai_parser.reset_model_cascade()
 
     months = config.INITIAL_SCAN_MONTHS if is_initial else 0
     days = None if is_initial else config.DAILY_SCAN_DAYS
@@ -50,9 +51,7 @@ def run_sync(is_initial: bool = False) -> dict:
     print(f"Found {len(skip_ids)} emails to skip forever")
     print(f"Found {len(retry_ids)} emails to retry from previous run")
     if not use_sheet:
-        prov = config.get_ai_provider()
-        limit = config.GROQ_DAILY_QUOTA_LIMIT if prov == "groq" else config.GEMINI_DAILY_QUOTA_LIMIT
-        print(f"AI: {prov.upper()} | Calls today: {database.get_daily_gemini_count()}/{limit}")
+        print(f"AI: multi-model fallback (Groq → Gemini) | Calls today: {database.get_daily_gemini_count()}")
 
     print("Fetching Gmail...")
     emails = list(gmail_client.fetch_emails(months_back=months, days_back=days))
@@ -70,11 +69,6 @@ def run_sync(is_initial: bool = False) -> dict:
         existing = database.get_all_applications()
 
     for idx, email in enumerate(to_process):
-        quota = config.GROQ_DAILY_QUOTA_LIMIT if config.get_ai_provider() == "groq" else config.GEMINI_DAILY_QUOTA_LIMIT
-        if not use_sheet and database.get_daily_gemini_count() >= quota:
-            print(f"\nDaily AI quota reached. Resume tomorrow.")
-            break
-
         if pre_filter.pre_filter(email):
             skipped += 1
             if use_sheet:
@@ -90,6 +84,9 @@ def run_sync(is_initial: bool = False) -> dict:
             status, parsed = ai_parser.parse_email_with_ai(email)
             if status == "quota":
                 print(f"\nDaily AI quota reached. Stopping. Resume tomorrow.")
+                break
+            if status == "all_exhausted":
+                print(f"\nAll AI quotas exhausted. Resume tomorrow.")
                 break
             if status in ("rate_limit_fail", "error"):
                 if not use_sheet:
@@ -136,25 +133,26 @@ def run_sync(is_initial: bool = False) -> dict:
                         existing[i] = {**a, "stage": new_stage, "notes": new_notes}
                         break
             else:
-                database.update_application(match["id"], new_stage, new_notes)
+                database.update_application(match["id"], new_stage, new_notes)  # Immediate save
             updated += 1
         else:
-            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            new_app = {
-                "company": company, "role": role, "stage": stage, "type": app_type,
-                "date_applied": date_applied, "last_updated": now, "notes": notes,
-            }
+            # New application: save to DB immediately (do not batch) — survives mid-run stops
             if use_sheet:
+                now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                new_app = {
+                    "company": company, "role": role, "stage": stage, "type": app_type,
+                    "date_applied": date_applied, "last_updated": now, "notes": notes,
+                }
                 existing.insert(0, new_app)
             else:
-                database.upsert_application(company, role, stage, app_type, date_applied, notes)
+                database.upsert_application(company, role, stage, app_type, date_applied, notes)  # Immediate save
             new_apps += 1
 
-        if use_sheet:
-            newly_processed.append(email["id"])
-        else:
+        if not use_sheet:
             database.mark_email_ai_completed(email["id"])
             existing = database.get_all_applications()
+        else:
+            newly_processed.append(email["id"])
 
         if (idx + 1) % 5 == 0:
             print(f"Progress: {idx + 1} processed, {new_apps + updated} applications")

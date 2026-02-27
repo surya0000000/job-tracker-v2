@@ -3,7 +3,7 @@
 import re
 from typing import Optional
 
-MAX_BODY_CHARS = 1500  # Job emails convey key info in first 1,500 chars
+MAX_BODY_CHARS = 800  # Job emails convey key info in first 800 chars; reduces tokens per call
 
 
 def clean_body(body: Optional[str]) -> str:
