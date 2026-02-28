@@ -4,13 +4,13 @@ google-auth-oauthlib>=1.1.0
 google-auth-httplib2>=0.1.1
 google-api-python-client>=2.100.0
 
-# AI: use one or both (Groq has 14x more free requests than Gemini)
+# AI: Groq, Gemini (google-genai), OpenAI, xAI (OpenAI-compatible)
 google-genai>=1.0.0
 groq>=0.5.0
-
-# AI cleaner (Gemini file upload, ChatGPT Assistants)
-google-generativeai>=0.8.0
 openai>=1.0.0
+
+# AI cleaner - gspread for Google Sheets
+gspread>=6.0.0
 
 # Utilities
 python-dateutil>=2.8.2

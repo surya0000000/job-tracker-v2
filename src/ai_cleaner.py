@@ -1,440 +1,383 @@
-"""AI sheet cleaning - filter non-job rows and enrich Company/Role from Notes."""
+"""AI sheet cleaning - filter non-job rows and enrich Company/Role using Gemini, ChatGPT, Groq, Grok."""
 
 from dotenv import load_dotenv
 from pathlib import Path
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-import json
 import os
-import time
-from typing import Optional
-
+import json
 import pandas as pd
+import gspread
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
-# Reuse sheets auth
-from src.sheets_sync import get_sheets_service
-import config
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
 
-PROMPT = """You are a job application classifier. The attached Excel file contains rows of email data 
-auto-parsed from a Gmail inbox. Each row has a Notes column containing the actual email content or 
-snippet that triggered this entry.
+CLASSIFY_PROMPT = """You are a job application classifier. Below is spreadsheet data 
+auto-parsed from a Gmail inbox. Each row has a Notes column containing the actual email content.
 
-Your job: read the Notes column for EVERY single row and decide if it represents a REAL job application 
+Read the Notes column for EVERY single row and decide if it represents a REAL job application 
 event — meaning the user actually applied to a job, OR received a company response to an actual 
-application (confirmation, rejection, interview invite, offer, online assessment, etc).
+application (confirmation, rejection, interview invite, offer, OA, phone screen, etc).
 
-A row is NOT a real job application if the Notes suggest it is:
-- A job alert or digest email ('Here are 5 new jobs matching your search', 'New jobs for you', etc)
+Mark as NOT a real job application if Notes suggest:
+- A job alert or digest email ('Here are 5 new jobs matching your search', 'New jobs for you')
 - A newsletter or promotional email from a job board
-- Recruiter cold outreach where the user never applied ('We found your profile', 'Are you open to opportunities')
-- A generic LinkedIn/Indeed/Handshake notification unrelated to a specific submitted application
-- Any automated platform notification that is not a response to a specific application
+- Recruiter cold outreach where user never applied ('We found your profile', 'Are you open to opportunities')
+- Generic LinkedIn/Indeed/Handshake notification unrelated to a specific submitted application
+- Any email that is NOT about a specific application the user submitted or a response to one
 
-Return ONLY a raw JSON object — no explanation, no markdown fences, just the JSON:
+Return ONLY raw JSON, absolutely no explanation, no markdown fences, just the JSON object:
 {
-  "keep_rows": [0, 2, 3, 5],
-  "remove_rows": [1, 4, 6],
+  "keep_rows": [0, 2, 3],
+  "remove_rows": [1, 4],
   "reasoning": {
     "1": "job alert digest email",
-    "4": "recruiter cold outreach, no application submitted",
-    "6": "LinkedIn newsletter"
+    "4": "recruiter cold outreach, user never applied"
   }
 }
 
 Row numbers are 0-indexed and do NOT count the header row.
-Process every single row — keep_rows + remove_rows must together equal the total number of data rows."""
+keep_rows + remove_rows combined must equal the total number of data rows — process every row.
 
+Here is the data:
+"""
 
-ENRICH_PROMPT = """You are a job application data enrichment assistant. The attached Excel file 
-contains job application rows that have already been confirmed as real job applications.
+ENRICH_PROMPT = """You are a job application data enrichment assistant. Below is spreadsheet 
+data of confirmed real job applications. The Company and Role columns may be inaccurate because 
+they were auto-extracted by a rule-based system. The Notes column contains the actual email content.
 
-The "Company" and "Role" columns were auto-extracted by a rule-based system and may be inaccurate. 
-The "Notes" column contains the actual email content for each row.
-
-Your job: for EVERY row, read the Notes column and determine the most accurate Company name and 
-Role/Job Title based on what the email actually says.
+For EVERY row, read the Notes column and determine the most accurate Company name and Role/Job Title.
 
 Rules for Company:
-- Extract the actual hiring company name, not the job board (e.g. if Notes mention "Your application 
-  to Google via LinkedIn", company is "Google" not "LinkedIn")
-- If the email is from Greenhouse/Lever/Workday/Ashby/Taleo on behalf of a company, extract that 
-  company's name
-- Use the most complete, properly capitalized version of the name (e.g. "Goldman Sachs" not "goldman")
-- If the existing Company value looks correct and Notes confirm it, keep it as-is
+- Extract the actual hiring company name, not the job board that sent the email
+- If email is from Greenhouse/Lever/Workday/Ashby/Taleo on behalf of a company, extract that company
+- Use properly capitalized full name ('Goldman Sachs' not 'goldman sachs')
+- If the existing Company value already looks correct and Notes confirm it, keep it as-is
 - If truly unidentifiable from Notes, keep the existing value
 
 Rules for Role:
-- Extract the full job title including seniority, specialization, and team if mentioned
-  (e.g. "Software Engineer II, Payments Infrastructure" instead of just "Software Engineer")
+- Extract the full job title including seniority, specialization, and team name if mentioned
 - Include intern/co-op/contract/full-time qualifier if present in the email
 - Use the exact title from the email when possible, not a paraphrase
-- If the existing Role value looks correct and Notes confirm it, keep it as-is
+- Examples: 'Software Engineer II, Payments Infrastructure' not just 'Software Engineer'
+- If the existing Role value already looks correct and Notes confirm it, keep it as-is
 - If truly unidentifiable from Notes, keep the existing value
 
-Return ONLY a raw JSON object — no explanation, no markdown fences, just the JSON:
+Return ONLY raw JSON, no explanation, no markdown fences — and ONLY include rows where you 
+are actually making an improvement to Company or Role:
 {
   "enriched": {
     "0": {"company": "Google", "role": "Software Engineer Intern, Core Systems"},
-    "1": {"company": "Goldman Sachs", "role": "Summer Analyst, Technology Division"},
     "3": {"company": "Stripe", "role": "New Grad Software Engineer"}
   }
 }
 
-Only include rows where you are making a change or improvement. If a row's existing Company and 
-Role are already accurate based on the Notes, do not include that row index in the response.
-Row numbers are 0-indexed and do NOT count the header row."""
+Row numbers are 0-indexed and do NOT count the header row.
+
+Here is the data:
+"""
 
 
-def _ensure_tab_exists(spreadsheet_id: str, tab_name: str) -> None:
-    """Create tab if it doesn't exist."""
-    service = get_sheets_service()
-    meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
-    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
-    if tab_name not in titles:
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
-        ).execute()
+def get_gspread_client():
+    creds = None
+    token_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "token.json")
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ])
+    if not creds:
+        creds_json = os.getenv("GOOGLE_TOKEN")
+        if creds_json:
+            import json as _json
+            creds = Credentials.from_authorized_user_info(
+                _json.loads(creds_json),
+                ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+            )
+    if not creds:
+        raise ValueError("No Google credentials. Set token.json or GOOGLE_TOKEN env var.")
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    return gspread.authorize(creds)
 
 
-def read_applications_tab(spreadsheet_id: str) -> pd.DataFrame:
-    """Read entire Applications tab into DataFrame."""
-    service = get_sheets_service()
-    result = service.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range="Applications!A:G",
-    ).execute()
-    values = result.get("values", [])
-    if not values:
-        return pd.DataFrame(columns=["Company", "Role", "Stage", "Type", "Date Applied", "Last Updated", "Notes"])
-    STANDARD_COLS = ["Company", "Role", "Stage", "Type", "Date Applied", "Last Updated", "Notes"]
-    raw_headers = values[0]
-    if len(raw_headers) < 7:
-        raw_headers = raw_headers + [""] * (7 - len(raw_headers))
-    headers = STANDARD_COLS
-    rows = []
-    for row in values[1:]:
-        r = row + [""] * (7 - len(row)) if len(row) < 7 else row[:7]
-        rows.append(r)
-    df = pd.DataFrame(rows, columns=headers)
+def read_applications(gc):
+    print("Reading Applications tab...")
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    ws = sh.worksheet("Applications")
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
+    print(f"Loaded {len(df)} rows from Applications tab")
     return df
 
 
-def gemini_clean(df: pd.DataFrame, xlsx_path: str) -> dict:
-    """Run Gemini classification on xlsx, return {keep_rows, remove_rows, reasoning}."""
-    import google.generativeai as genai
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set")
-    genai.configure(api_key=api_key)
+def df_to_text(df):
+    return df.to_csv(index=True)
 
-    uploaded_file = genai.upload_file(
-        path=xlsx_path,
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+
+def parse_json_response(raw):
+    raw = raw.strip()
+    if "```" in raw:
+        parts = raw.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            try:
+                return json.loads(part)
+            except Exception:
+                continue
+    return json.loads(raw)
+
+
+def gemini_clean(df):
+    from google import genai
+    print("Running Gemini classification...")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    csv_text = df_to_text(df)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash-lite",
+        contents=CLASSIFY_PROMPT + csv_text,
     )
-
-    while uploaded_file.state.name == "PROCESSING":
-        time.sleep(2)
-        uploaded_file = genai.get_file(uploaded_file.name)
-
-    if uploaded_file.state.name != "ACTIVE":
-        raise Exception(f"Gemini file upload failed: {uploaded_file.state.name}")
-
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    response = model.generate_content([uploaded_file, PROMPT])
-    raw = response.text
-
-    genai.delete_file(uploaded_file.name)
-
-    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-    result = json.loads(raw)
-    return result
+    return parse_json_response(response.text)
 
 
-def chatgpt_clean(df: pd.DataFrame, xlsx_path: str) -> dict:
-    """Run ChatGPT classification via Assistants API, return {keep_rows, remove_rows, reasoning}."""
+def gemini_enrich(df):
+    from google import genai
+    print("Running Gemini enrichment...")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    csv_text = df_to_text(df)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash-lite",
+        contents=ENRICH_PROMPT + csv_text,
+    )
+    return parse_json_response(response.text)
+
+
+def chatgpt_clean(df):
     import openai
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-    client = openai.OpenAI(api_key=api_key)
-
-    with open(xlsx_path, "rb") as f:
-        uploaded_file = client.files.create(file=f, purpose="assistants")
-
-    assistant = client.beta.assistants.create(
-        name="Job App Cleaner",
-        instructions="You are a job application classifier. Analyze Excel files and return JSON only.",
-        model="gpt-4o",
-        tools=[{"type": "code_interpreter"}],
+    print("Running ChatGPT classification...")
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    csv_text = df_to_text(df)
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "You are a job application classifier. Return only raw JSON, no markdown."},
+            {"role": "user", "content": CLASSIFY_PROMPT + csv_text},
+        ],
+        max_tokens=4000,
     )
+    return parse_json_response(response.choices[0].message.content)
 
-    thread = client.beta.threads.create()
-    client.beta.threads.messages.create(
-        thread_id=thread.id,
-        role="user",
-        content=PROMPT,
-        attachments=[{"file_id": uploaded_file.id, "tools": [{"type": "code_interpreter"}]}],
+
+def chatgpt_enrich(df):
+    import openai
+    print("Running ChatGPT enrichment...")
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    csv_text = df_to_text(df)
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "You are a job application enrichment assistant. Return only raw JSON, no markdown."},
+            {"role": "user", "content": ENRICH_PROMPT + csv_text},
+        ],
+        max_tokens=4000,
     )
+    return parse_json_response(response.choices[0].message.content)
 
-    run = client.beta.threads.runs.create_and_poll(
-        thread_id=thread.id,
-        assistant_id=assistant.id,
-        timeout=300,
+
+def groq_clean(df):
+    from groq import Groq
+    print("Running Groq classification...")
+    client = Groq(api_key=GROQ_API_KEY)
+    csv_text = df_to_text(df)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "You are a job application classifier. Return only raw JSON, no markdown."},
+            {"role": "user", "content": CLASSIFY_PROMPT + csv_text},
+        ],
+        max_tokens=4000,
     )
-
-    if run.status != "completed":
-        raise Exception(f"ChatGPT run failed with status: {run.status}")
-
-    messages = client.beta.threads.messages.list(thread_id=thread.id)
-    raw = messages.data[0].content[0].text.value
-
-    client.files.delete(uploaded_file.id)
-    client.beta.assistants.delete(assistant.id)
-
-    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-    result = json.loads(raw)
-    return result
+    return parse_json_response(response.choices[0].message.content)
 
 
-def apply_filter(df: pd.DataFrame, result: dict, model_name: str) -> tuple[pd.DataFrame, list[dict]]:
-    """Split df into kept_df and removed_df. Return kept_df with Removal_Reason column + removed_summary."""
-    keep_rows = set(result.get("keep_rows", []))
-    remove_rows = set(result.get("remove_rows", []))
+def groq_enrich(df):
+    from groq import Groq
+    print("Running Groq enrichment...")
+    client = Groq(api_key=GROQ_API_KEY)
+    csv_text = df_to_text(df)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "You are a job application enrichment assistant. Return only raw JSON, no markdown."},
+            {"role": "user", "content": ENRICH_PROMPT + csv_text},
+        ],
+        max_tokens=4000,
+    )
+    return parse_json_response(response.choices[0].message.content)
+
+
+def grok_clean(df):
+    import openai
+    print("Running Grok classification...")
+    client = openai.OpenAI(
+        api_key=GROK_API_KEY,
+        base_url="https://api.x.ai/v1",
+    )
+    csv_text = df_to_text(df)
+    response = client.chat.completions.create(
+        model="grok-3-mini",
+        messages=[
+            {"role": "system", "content": "You are a job application classifier. Return only raw JSON, no markdown."},
+            {"role": "user", "content": CLASSIFY_PROMPT + csv_text},
+        ],
+        max_tokens=4000,
+    )
+    return parse_json_response(response.choices[0].message.content)
+
+
+def grok_enrich(df):
+    import openai
+    print("Running Grok enrichment...")
+    client = openai.OpenAI(
+        api_key=GROK_API_KEY,
+        base_url="https://api.x.ai/v1",
+    )
+    csv_text = df_to_text(df)
+    response = client.chat.completions.create(
+        model="grok-3-mini",
+        messages=[
+            {"role": "system", "content": "You are a job application enrichment assistant. Return only raw JSON, no markdown."},
+            {"role": "user", "content": ENRICH_PROMPT + csv_text},
+        ],
+        max_tokens=4000,
+    )
+    return parse_json_response(response.choices[0].message.content)
+
+
+def apply_filter(df, result, model_name):
+    keep_indices = result.get("keep_rows", [])
+    remove_indices = result.get("remove_rows", [])
     reasoning = result.get("reasoning", {})
 
-    kept_indices = [i for i in range(len(df)) if i in keep_rows]
-    kept_df = df.iloc[kept_indices].copy()
+    keep_indices = [i for i in keep_indices if i < len(df)]
+    remove_indices = [i for i in remove_indices if i < len(df)]
+
+    kept_df = df.iloc[keep_indices].copy().reset_index(drop=True)
     kept_df["Removal_Reason"] = ""
 
-    removed_summary = []
-    for i in sorted(remove_rows):
-        if i < len(df):
-            row = df.iloc[i]
-            reason = reasoning.get(str(i), "No reason provided")
-            removed_summary.append({
-                "row": i,
-                "company": str(row.get("Company", ""))[:50],
-                "role": str(row.get("Role", ""))[:50],
-                "reason": reason,
-            })
+    removed_df = df.iloc[remove_indices].copy().reset_index(drop=True)
+    removed_df["Removal_Reason"] = [
+        reasoning.get(str(i), "filtered by AI") for i in remove_indices
+    ]
 
-    return kept_df, removed_summary
+    print(f"{model_name} → kept {len(kept_df)}, removed {len(removed_df)}")
+    for _, row in removed_df.iterrows():
+        print(f"  REMOVED | {str(row.get('Company', '?'))[:25]:<25} | {str(row.get('Role', '?'))[:35]:<35} | {row['Removal_Reason']}")
+
+    return kept_df, removed_df
 
 
-def enrich_company_role(df: pd.DataFrame, xlsx_path: str, model_name: str) -> tuple[pd.DataFrame, int]:
-    """Enrich Company and Role from Notes. Returns (enriched_df, count_enriched)."""
-    if model_name == "gemini":
-        return _enrich_gemini(df, xlsx_path)
-    return _enrich_chatgpt(df, xlsx_path)
+def apply_enrichment(df, result, model_name):
+    enriched = result.get("enriched", {})
+    count = 0
+    for idx_str, updates in enriched.items():
+        idx = int(idx_str)
+        if idx < len(df):
+            if updates.get("company"):
+                df.at[idx, "Company"] = updates["company"]
+            if updates.get("role"):
+                df.at[idx, "Role"] = updates["role"]
+            count += 1
+    if count > 0:
+        print(f"{model_name} enriched {count} rows (company/role improved from Notes)")
+    return df
 
 
-def _enrich_gemini(df: pd.DataFrame, xlsx_path: str) -> tuple[pd.DataFrame, int]:
-    import google.generativeai as genai
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        return df, 0
-    genai.configure(api_key=api_key)
+def write_tab(gc, tab_name, df):
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    try:
+        ws = sh.worksheet(tab_name)
+        ws.clear()
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=tab_name, rows=str(len(df) + 10), cols="20")
 
-    uploaded_file = genai.upload_file(
-        path=xlsx_path,
-        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    while uploaded_file.state.name == "PROCESSING":
-        time.sleep(2)
-        uploaded_file = genai.get_file(uploaded_file.name)
-    if uploaded_file.state.name != "ACTIVE":
-        return df, 0
-
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    response = model.generate_content([uploaded_file, ENRICH_PROMPT])
-    genai.delete_file(uploaded_file.name)
-
-    raw = response.text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-    result = json.loads(raw)
-    enriched_data = result.get("enriched", {})
-    enriched_rows = set()
-    for row_idx_str, updates in enriched_data.items():
-        try:
-            idx = int(row_idx_str)
-            if 0 <= idx < len(df):
-                if "company" in updates and updates["company"]:
-                    df.iloc[idx, df.columns.get_loc("Company")] = updates["company"]
-                    enriched_rows.add(idx)
-                if "role" in updates and updates["role"]:
-                    df.iloc[idx, df.columns.get_loc("Role")] = updates["role"]
-                    enriched_rows.add(idx)
-        except Exception:
-            pass
-    return df, len(enriched_rows)
+    headers = df.columns.tolist()
+    rows = [[str(c) for c in row] for row in df.values.tolist()]
+    ws.update([headers] + rows)
+    print(f"Written {len(df)} rows to tab '{tab_name}'")
 
 
-def _enrich_chatgpt(df: pd.DataFrame, xlsx_path: str) -> tuple[pd.DataFrame, int]:
-    import openai
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return df, 0
-    client = openai.OpenAI(api_key=api_key)
-
-    with open(xlsx_path, "rb") as f:
-        uploaded_file = client.files.create(file=f, purpose="assistants")
-
-    assistant = client.beta.assistants.create(
-        name="Job App Enricher",
-        instructions="Enrich job application data. Return JSON only.",
-        model="gpt-4o",
-        tools=[{"type": "code_interpreter"}],
-    )
-
-    thread = client.beta.threads.create()
-    client.beta.threads.messages.create(
-        thread_id=thread.id,
-        role="user",
-        content=ENRICH_PROMPT,
-        attachments=[{"file_id": uploaded_file.id, "tools": [{"type": "code_interpreter"}]}],
-    )
-
-    run = client.beta.threads.runs.create_and_poll(
-        thread_id=thread.id,
-        assistant_id=assistant.id,
-        timeout=300,
-    )
-
-    client.files.delete(uploaded_file.id)
-    client.beta.assistants.delete(assistant.id)
-
-    if run.status != "completed":
-        return df, 0
-
-    messages = client.beta.threads.messages.list(thread_id=thread.id)
-    raw = messages.data[0].content[0].text.value
-    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-    result = json.loads(raw)
-    enriched_data = result.get("enriched", {})
-    enriched_rows = set()
-    for row_idx_str, updates in enriched_data.items():
-        try:
-            idx = int(row_idx_str)
-            if 0 <= idx < len(df):
-                if "company" in updates and updates["company"]:
-                    df.iloc[idx, df.columns.get_loc("Company")] = updates["company"]
-                    enriched_rows.add(idx)
-                if "role" in updates and updates["role"]:
-                    df.iloc[idx, df.columns.get_loc("Role")] = updates["role"]
-                    enriched_rows.add(idx)
-        except Exception:
-            pass
-    return df, len(enriched_rows)
-
-
-def write_tab(spreadsheet_id: str, tab_name: str, df: pd.DataFrame) -> None:
-    """Write DataFrame to tab. Create tab if missing, clear, write header + rows."""
-    _ensure_tab_exists(spreadsheet_id, tab_name)
-    service = get_sheets_service()
-
-    cols = list(df.columns)
-    rows = [cols]
-    for _, r in df.iterrows():
-        rows.append([str(r.get(c, "")) for c in cols])
-
-    range_name = f"'{tab_name}'!A1"
-    clear_range = f"'{tab_name}'!A:Z"
-    service.spreadsheets().values().clear(
-        spreadsheetId=spreadsheet_id,
-        range=clear_range,
-    ).execute()
-    if rows:
-        service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=range_name,
-            valueInputOption="USER_ENTERED",
-            body={"values": rows},
-        ).execute()
-    print(f"Written {len(rows) - 1} rows to tab '{tab_name}'")
-
-
-def run_ai_cleaning(
-    gemini_only: bool = False,
-    chatgpt_only: bool = False,
-) -> None:
-    """Main entry: read Applications, filter with AI, enrich, write to Cleaned_Gemini and Cleaned_ChatGPT tabs."""
-    spreadsheet_id = config.get_spreadsheet_id()
-    if not spreadsheet_id:
+def run_ai_cleaning(gemini_only=False, chatgpt_only=False, groq_only=False, grok_only=False):
+    if not SPREADSHEET_ID:
         raise ValueError("SPREADSHEET_ID not set. Add it to .env or set as GitHub secret.")
 
-    print("Reading Applications tab...")
-    df = read_applications_tab(spreadsheet_id)
-    total_rows = len(df)
+    gc = get_gspread_client()
+    df = read_applications(gc)
+    total = len(df)
 
-    if total_rows == 0:
-        print("Applications tab is empty. Nothing to clean.")
-        return
+    if gemini_only:
+        models = ["gemini"]
+    elif chatgpt_only:
+        models = ["chatgpt"]
+    elif groq_only:
+        models = ["groq"]
+    elif grok_only:
+        models = ["grok"]
+    else:
+        models = ["gemini", "chatgpt", "groq", "grok"]
 
-    xlsx_full = "/tmp/applications_full.xlsx"
-    df.to_excel(xlsx_full, index=False)
-    print(f"Saved {total_rows} rows to {xlsx_full}")
+    model_config = {
+        "gemini": {"clean": gemini_clean, "enrich": gemini_enrich, "tab": "Cleaned_Gemini"},
+        "chatgpt": {"clean": chatgpt_clean, "enrich": chatgpt_enrich, "tab": "Cleaned_ChatGPT"},
+        "groq": {"clean": groq_clean, "enrich": groq_enrich, "tab": "Cleaned_Groq"},
+        "grok": {"clean": grok_clean, "enrich": grok_enrich, "tab": "Cleaned_Grok"},
+    }
 
-    gemini_kept = gemini_removed = 0
-    chatgpt_kept = chatgpt_removed = 0
-    gemini_enriched = chatgpt_enriched = 0
+    summary = {}
 
-    if not chatgpt_only:
+    for model in models:
+        cfg = model_config[model]
+        print(f"\n{'='*50}")
+        print(f"Processing model: {model.upper()}")
+        print(f"{'='*50}")
         try:
-            print("Running Gemini classification...")
-            result = gemini_clean(df, xlsx_full)
-            kept_df, removed = apply_filter(df, result, "gemini")
-            gemini_kept = len(kept_df)
-            gemini_removed = len(removed)
+            classify_result = cfg["clean"](df)
+            kept_df, removed_df = apply_filter(df, classify_result, model.capitalize())
 
-            kept_df = kept_df.reset_index(drop=True)
-            kept_df.to_excel("/tmp/applications_cleaned_gemini.xlsx", index=False)
             try:
-                enriched_df, count = enrich_company_role(kept_df, "/tmp/applications_cleaned_gemini.xlsx", "gemini")
-                gemini_enriched = count
-                kept_df = enriched_df
-                if count > 0:
-                    print(f"Gemini enriched {count} rows (company/role improved from Notes content)")
+                enrich_df = kept_df.drop(columns=["Removal_Reason"], errors="ignore")
+                enrich_result = cfg["enrich"](enrich_df)
+                kept_df = apply_enrichment(kept_df, enrich_result, model.capitalize())
             except Exception as e:
-                print(f"Gemini enrichment failed: {e}")
+                print(f"{model.capitalize()} enrichment failed (skipping enrichment): {e}")
 
-            write_tab(spreadsheet_id, "Cleaned_Gemini", kept_df)
+            write_tab(gc, cfg["tab"], kept_df)
+            summary[model] = {"kept": len(kept_df), "removed": total - len(kept_df), "status": "success"}
+
         except Exception as e:
-            print(f"Gemini cleaning failed: {e}")
+            print(f"{model.capitalize()} FAILED: {e}")
+            summary[model] = {"kept": 0, "removed": 0, "status": f"failed: {e}"}
 
-    if not gemini_only:
-        try:
-            print("Running ChatGPT classification...")
-            result = chatgpt_clean(df, xlsx_full)
-            kept_df, removed = apply_filter(df, result, "chatgpt")
-            chatgpt_kept = len(kept_df)
-            chatgpt_removed = len(removed)
-
-            kept_df = kept_df.reset_index(drop=True)
-            kept_df.to_excel("/tmp/applications_cleaned_chatgpt.xlsx", index=False)
-            try:
-                enriched_df, count = enrich_company_role(kept_df, "/tmp/applications_cleaned_chatgpt.xlsx", "chatgpt")
-                chatgpt_enriched = count
-                kept_df = enriched_df
-                if count > 0:
-                    print(f"ChatGPT enriched {count} rows (company/role improved from Notes content)")
-            except Exception as e:
-                print(f"ChatGPT enrichment failed: {e}")
-
-            write_tab(spreadsheet_id, "Cleaned_ChatGPT", kept_df)
-        except Exception as e:
-            print(f"ChatGPT cleaning failed: {e}")
-
-    print("\n--- Summary ---")
-    print(f"Applications tab total: {total_rows} rows")
-    if not chatgpt_only:
-        print(f"Gemini  → kept {gemini_kept}, removed {gemini_removed}")
-    if not gemini_only:
-        print(f"ChatGPT → kept {chatgpt_kept}, removed {chatgpt_removed}")
-    print("Both tabs updated in Google Sheet.")
-
-    print("\nNOTE: Make sure OPENAI_API_KEY is set in your .env for local runs,")
-    print("and added as a GitHub Actions secret named OPENAI_API_KEY for CI runs.")
+    print(f"\n{'='*50}")
+    print("FINAL SUMMARY")
+    print(f"{'='*50}")
+    print(f"Applications tab total: {total} rows\n")
+    for model, s in summary.items():
+        status = s["status"]
+        if status == "success":
+            print(f"{model.upper():<10} → kept {s['kept']}, removed {s['removed']} ✓")
+        else:
+            print(f"{model.upper():<10} → FAILED: {status}")
+    success_tabs = [model_config[m]["tab"] for m in models if summary[m]["status"] == "success"]
+    print(f"\nTabs updated: {', '.join(success_tabs)}")
 
 
 if __name__ == "__main__":
