@@ -11,6 +11,10 @@ import gspread
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import config
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -85,25 +89,31 @@ Here is the data:
 
 
 def get_gspread_client():
+    """Get gspread client using same auth as sheets_sync.py."""
     creds = None
-    token_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "token.json")
-    if os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ])
+    creds_json = os.getenv("GOOGLE_CREDENTIALS")
+    token_json = os.getenv("GOOGLE_TOKEN")
+
+    # Try env vars first (GitHub Actions)
+    if creds_json and token_json:
+        try:
+            token_data = json.loads(token_json)
+            creds = Credentials.from_authorized_user_info(token_data, config.GMAIL_SCOPES)
+        except Exception:
+            pass
+
+    # Fall back to token.json file (local)
     if not creds:
-        creds_json = os.getenv("GOOGLE_TOKEN")
-        if creds_json:
-            import json as _json
-            creds = Credentials.from_authorized_user_info(
-                _json.loads(creds_json),
-                ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
-            )
+        token_path = Path(__file__).parent.parent / "token.json"
+        if token_path.exists():
+            creds = Credentials.from_authorized_user_file(str(token_path), config.GMAIL_SCOPES)
+
     if not creds:
-        raise ValueError("No Google credentials. Set token.json or GOOGLE_TOKEN env var.")
+        raise ValueError("No Google credentials found. Set GOOGLE_TOKEN env var or ensure token.json exists.")
+
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
+
     return gspread.authorize(creds)
 
 
@@ -335,10 +345,10 @@ def run_ai_cleaning(gemini_only=False, chatgpt_only=False, groq_only=False, grok
         models = ["gemini", "chatgpt", "groq", "grok"]
 
     model_config = {
-        "gemini": {"clean": gemini_clean, "enrich": gemini_enrich, "tab": "Cleaned_Gemini"},
+        "gemini":  {"clean": gemini_clean,  "enrich": gemini_enrich,  "tab": "Cleaned_Gemini"},
         "chatgpt": {"clean": chatgpt_clean, "enrich": chatgpt_enrich, "tab": "Cleaned_ChatGPT"},
-        "groq": {"clean": groq_clean, "enrich": groq_enrich, "tab": "Cleaned_Groq"},
-        "grok": {"clean": grok_clean, "enrich": grok_enrich, "tab": "Cleaned_Grok"},
+        "groq":    {"clean": groq_clean,    "enrich": groq_enrich,    "tab": "Cleaned_Groq"},
+        "grok":    {"clean": grok_clean,    "enrich": grok_enrich,    "tab": "Cleaned_Grok"},
     }
 
     summary = {}
@@ -357,7 +367,7 @@ def run_ai_cleaning(gemini_only=False, chatgpt_only=False, groq_only=False, grok
                 enrich_result = cfg["enrich"](enrich_df)
                 kept_df = apply_enrichment(kept_df, enrich_result, model.capitalize())
             except Exception as e:
-                print(f"{model.capitalize()} enrichment failed (skipping enrichment): {e}")
+                print(f"{model.capitalize()} enrichment failed (skipping): {e}")
 
             write_tab(gc, cfg["tab"], kept_df)
             summary[model] = {"kept": len(kept_df), "removed": total - len(kept_df), "status": "success"}
